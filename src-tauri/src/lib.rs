@@ -395,11 +395,21 @@ async fn fetch_weather(app: AppHandle) -> Result<WeatherPayload, String> {
 /// Test an unsaved key/host/city combo from the settings window.
 #[tauri::command]
 async fn probe_weather(
+    state: State<'_, AppState>,
     host: String,
     key: String,
     location_id: String,
 ) -> Result<WeatherPayload, String> {
-    weather::probe(&host, &key, &location_id).await
+    // The settings window auto-saves on every edit, so the index the user just
+    // picked is already in the persisted config - read it from there rather
+    // than adding a fourth argument the front end has to keep in sync.
+    let advice_type = {
+        let Ok(guard) = state.config.lock() else {
+            return Err("配置锁被占用".to_string());
+        };
+        guard.weather_advice_type
+    };
+    weather::probe(&host, &key, &location_id, advice_type).await
 }
 
 /// Search a city by keyword. Falls back to the saved key when the settings

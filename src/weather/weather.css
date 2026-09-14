@@ -1,64 +1,85 @@
 /* ---------------------------------------------------------------- weather
-   Reference layout: everything is centred on the card's vertical axis - the
-   hero block, the advice sentence, the stats line and the forecast cells.
-   Inside the hero the reading itself is right-aligned against the icon.
-
-   The hero is deliberately tight: a big icon with three lines of air around it
-   used to eat a third of the card, so the icon, the reading and the feels-like
-   line now sit in one compact cluster with the surrounding padding pulled in. */
+   The hero - icon, temperature, condition - is centred on the card's axis as
+   one cluster: the two stacked readings are as tall as the icon, so the three
+   read as a single block. The feels-like line is centred on its own row
+   underneath instead of hanging off the icon.
+   Everything below the hero is centred too. */
 .wx-now {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 12px 2px;
+}
+
+.wx-now-hero {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 9px;
-  padding: 6px 12px 1px;
-}
-
-.wx-now svg {
-  flex: 0 0 auto;
-}
-
-/* temperature + condition on top, feels-like underneath */
-.wx-now-main {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
+  /* The icon and the reading are one subject: they sit shoulder to shoulder,
+     and the icon is a touch taller than the two stacked lines so the block
+     still reads as weather-first. */
+  /* The icon frame is tight now, so this is the real gap between the glyph
+     and the temperature - not a gap plus viewBox padding. */
+  gap: 3px;
   min-width: 0;
 }
 
-.wx-now-line {
+.wx-now-hero svg {
+  flex: 0 0 auto;
+  display: block;
+}
+
+.wx-now-stack {
   display: flex;
-  align-items: baseline;
-  gap: 6px;
-  white-space: nowrap;
+  flex-direction: column;
+  min-width: 0;
 }
 
 .wx-temp {
-  font-size: 33px;
+  font-size: 36px;
   font-weight: 250;
-  line-height: 1.05;
+  line-height: 1.06;
   letter-spacing: -1.2px;
   font-variant-numeric: tabular-nums;
 }
 
 .wx-cond {
-  font-size: 12.5px;
+  font-size: 13.5px;
   font-weight: 620;
   letter-spacing: 0.2px;
+  line-height: 1.3;
   white-space: nowrap;
 }
 
 .wx-feels {
-  font-size: 10px;
+  font-size: 11px;
   color: var(--fg-dim);
 }
 
-/* the lifestyle sentence (和风 "交通指数"), wraps to two lines at base width */
+/* the lifestyle sentence - up to three centred lines from `wrapAdvice`.
+   The height is reserved whether or not the sentence fills it, so a short
+   index and a long one give the window exactly the same height. */
 .wx-advice {
   margin: 0;
-  padding: 4px 14px 2px;
-  font-size: 11px;
-  line-height: 1.7;
+  padding: 6px 14px 0;
+}
+
+.wx-advice-lines {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 1px;
+  font-size: 11.5px;
+  line-height: 1.6;
+  /* three lines, always */
+  height: calc(3 * 1.6em + 2 * 1px);
+  overflow: hidden;
+}
+
+.wx-advice-line {
+  font-size: 11.5px;
+  line-height: 1.6;
   text-align: center;
   color: var(--fg);
 }
@@ -68,7 +89,7 @@
   flex-wrap: wrap;
   justify-content: center;
   align-items: baseline;
-  padding: 4px 12px 5px;
+  padding: 8px 12px 6px;
   font-size: 11px;
   color: var(--fg-dim);
   font-variant-numeric: tabular-nums;
@@ -81,14 +102,24 @@
 }
 
 /* ------------------------------------------------------------- forecast
-   Flex + percentage widths instead of a grid: a partial last row (5, 6 or 7
-   days) then stays centred instead of hugging the left edge. */
+   One row of `weatherForecastCols` cells. Days beyond that stay in the flow
+   and scroll sideways; the chevron is the only hint that there is more,
+   because a scrollbar would cost more height than the row is worth. */
 .wx-daily {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
+  position: relative;
   border-top: 1px solid var(--panel-hairline);
-  padding: 6px 8px 7px;
+  padding: 8px 10px 10px;
+}
+
+.wx-daily-scroll {
+  display: flex;
+  overflow-x: auto;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.wx-daily-scroll::-webkit-scrollbar {
+  display: none;
 }
 
 .wx-day-slot {
@@ -102,7 +133,34 @@
   flex-direction: column;
   align-items: center;
   gap: 2px;
-  padding: 1px 1px;
+  padding: 1px;
+}
+
+.wx-daily-scroll.has-more {
+  /* Make room for the chevron: the cells are sized off the content box, so
+     this narrows every cell a touch instead of letting the third one run
+     underneath the arrow. */
+  padding-right: 16px;
+}
+
+.wx-daily-more {
+  position: absolute;
+  top: 50%;
+  right: 0;
+  transform: translateY(-50%);
+  width: 18px;
+  height: 72%;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  font-size: 15px;
+  line-height: 1;
+  color: var(--fg-faint);
+  /* Fade the last cell out under the chevron so the hint reads even when a
+     partially scrolled cell sits behind it. */
+  background: linear-gradient(to right, transparent, var(--panel-bg) 70%);
+  /* Purely a hint - it must not eat the clicks meant for the card. */
+  pointer-events: none;
 }
 
 .wx-day-name {

@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api, onSnapshot } from "../shared/api";
 import { useLiveConfig } from "../shared/useLiveConfig";
 import { useStage } from "../shared/uiScale";
@@ -68,7 +69,7 @@ function DiskTile({ disk }: { disk: DiskInfo }) {
   const used = Number.isFinite(disk.percent) ? disk.percent : 0;
   const width = Math.max(1.5, Math.min(100, used));
   const barColor =
-    used >= 92 ? "var(--danger)" : used >= 78 ? "var(--warn)" : "var(--accent-cpu)";
+    used >= 92 ? "var(--danger)" : used >= 78 ? "var(--warn)" : "var(--accent-disk)";
   const label = disk.name ? `${letter}: ${disk.name}` : `${letter}:`;
 
   return (
@@ -88,42 +89,51 @@ function DiskTile({ disk }: { disk: DiskInfo }) {
 }
 
 /**
- * Read/write throughput per *physical* drive, side by side.
+ * Read/write throughput per *physical* drive, stacked.
  *
- * Each drive is one column of three lines, so the two columns share their rows
- * and the block stays about as tall as the volume tiles beside it.
+ * Each drive owns two rows - the heading, then read and write side by side -
+ * so a drive stays one block instead of two half-columns of numbers. Two
+ * drives then come out about as tall as the three volume tiles beside them.
  */
-/** `C/D` -> `C:/D:`, so the heading reads the way Explorer writes a path. */
+/**
+ * `固态 C/D` -> `SSD C+D`: the kind tag plus every volume that lives on that
+ * physical drive. Latin tags rather than 固态/机械 because the heading shares
+ * one ~110px line with up to three letters, and `+` because these volumes are
+ * summed, not listed.
+ */
 function driveHeading(drive: DriveInfo): string {
-  return drive.letters
-    .split("/")
-    .map((letter) => `${letter}:`)
-    .join("/");
+  const kind = drive.isSsd === true ? "SSD" : drive.isSsd === false ? "HDD" : "DISK";
+  // `letters` arrives as `C:/D:` - the colons are Explorer-speak, and here the
+  // volumes are summed rather than listed, so strip them and join with `+`.
+  const letters = drive.letters.replace(/:/g, "").replace("/", "+");
+  return `${kind} ${letters}`;
 }
 
 function DriveIo({ drives }: { drives: DriveInfo[] }) {
   if (!drives.length) return null;
   return (
-    <div
-      className="disk-io"
-      style={{ gridTemplateColumns: `repeat(${drives.length}, minmax(0, 1fr))` }}
-    >
+    <div className="disk-io">
       {drives.map((drive) => (
         <div
           className="disk-io-item"
           key={drive.device}
           title={
-            `${kindLabel(drive)} ${driveHeading(drive)}` +
+            `${kindLabel(drive)} ${drive.letters}` +
             (drive.label ? ` · ${drive.label}` : "") +
             `\n读 ${formatRateCompact(drive.readSec)} · 写 ${formatRateCompact(drive.writeSec)}`
           }
         >
-          {/* Just the letters: two drives share one column, so ~50px each, and
-              a `固态` / `机械` prefix would push the heading into an ellipsis.
-              The kind (and unrounded speeds) live in the tooltip. */}
           <span className="disk-io-title">{driveHeading(drive)}</span>
-          <span className="disk-io-line">读{formatRateCompact(drive.readSec, 0)}</span>
-          <span className="disk-io-line">写{formatRateCompact(drive.writeSec, 0)}</span>
+          <span className="disk-io-line">
+            <span className="disk-io-op">读</span>
+            <span className="disk-io-val">
+              {formatRateCompact(drive.readSec, 0)}
+            </span>
+            <span className="disk-io-op">写</span>
+            <span className="disk-io-val">
+              {formatRateCompact(drive.writeSec, 0)}
+            </span>
+          </span>
         </div>
       ))}
     </div>
@@ -138,6 +148,9 @@ export function MonitorPanel({ config }: { config: AppConfig }) {
 
   const [snap, setSnap] = useState<Snapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /** observed gap between the two most recent snapshots, for the fps probe */
+  const snapGapRef = useRef(0);
+  const lastSnapTsRef = useRef(0);
 
   useEffect(() => {
     let alive = true;
@@ -153,6 +166,11 @@ export function MonitorPanel({ config }: { config: AppConfig }) {
       });
 
     onSnapshot((s) => {
+      // s.ts is the epoch millis of the sample - the honest interval.
+      if (lastSnapTsRef.current) {
+        snapGapRef.current = s.ts - lastSnapTsRef.current;
+      }
+      lastSnapTsRef.current = s.ts;
       if (alive) setSnap(s);
     }).then((u) => {
       unlisten = u;
@@ -164,9 +182,41 @@ export function MonitorPanel({ config }: { config: AppConfig }) {
     };
   }, []);
 
+  // Diagnostic probe (`debugFps` in config.json): the rendering side can be
+  // cleared or convicted with one number - the title carries the real rAF
+  // fps plus the observed snapshot interval, so "frame rate vs sample rate"
+  // is answerable from the taskbar instead of guessed.
+  useEffect(() => {
+    if (!cfg.debugFps) return;
+    const win = getCurrentWindow();
+    let frames = 0;
+    let windowStart = performance.now();
+    let raf = 0;
+    const tick = (now: number) => {
+      frames += 1;
+      const span = now - windowStart;
+      if (span >= 1000) {
+        const fps = Math.round((frames * 1000) / span);
+        frames = 0;
+        windowStart = now;
+        void win.setTitle(
+          `WSight Monitor | ${fps}fps · snap ${Math.round(snapGapRef.current)}ms`,
+        );
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [cfg.debugFps]);
+
   // Column count drives both the gauge row and the disk block, so the tiles
   // always sit directly under the gauges.
   const cols = 2 + (showGpu ? 1 : 0) + (showNet ? 1 : 0);
+
+  // One sample spread over ~90% of the sampling interval: the eased gauges
+  // are then in motion almost the whole time between snapshots, which is
+  // what makes the rings read as continuous instead of once-a-second ticks.
+  const ringRamp = Math.max(200, Math.round(cfg.monitorIntervalMs * 0.9));
 
   const volumes = useMemo(
     () => (snap ? pickVolumes(snap.disks, cfg.monitorDisks) : []),
@@ -267,7 +317,12 @@ export function MonitorPanel({ config }: { config: AppConfig }) {
                 CPU
               </span>
               <div className="mon-col-slot">
-                <Ring value={cpu?.load ?? 0} color="var(--accent-cpu)" title={cpuTitle} />
+                <Ring
+                  value={cpu?.load ?? 0}
+                  color="var(--accent-cpu)"
+                  ramp={ringRamp}
+                  title={cpuTitle}
+                />
               </div>
               <span className="mon-col-l1">
                 {cpu ? formatClock(cpu.freqLiveMhz, cpu.freqMhz) : "--"}
@@ -283,6 +338,7 @@ export function MonitorPanel({ config }: { config: AppConfig }) {
                 <Ring
                   value={mem?.percent ?? 0}
                   color="var(--accent-mem)"
+                  ramp={ringRamp}
                   title={memTitle}
                 />
               </div>
@@ -301,6 +357,7 @@ export function MonitorPanel({ config }: { config: AppConfig }) {
                   <Ring
                     value={gpu?.load ?? 0}
                     color="var(--accent-gpu)"
+                    ramp={ringRamp}
                     title={gpuTitle}
                   />
                 </div>

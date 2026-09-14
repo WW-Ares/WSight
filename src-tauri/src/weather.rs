@@ -110,10 +110,17 @@ struct IndicesResponse {
     daily: Option<Vec<WeatherAdvice>>,
 }
 
-/// 交通指数 (QWeather index type 15). Its `text` is a full sentence such as
-/// "天气较好，路面干燥，交通气象条件良好，车辆可以正常行驶。" - the one line
-/// of prose the weather card shows under the temperature.
-const TRAFFIC_INDEX: &str = "15";
+/// The lifestyle index is user-selectable (1..16, see `config::ADVICE_TYPE_*`).
+/// Config values arrive already clamped, but `probe` is fed straight from the
+/// settings window, so guard it here too: an out-of-range id fails the whole
+/// request instead of just coming back empty.
+fn advice_type_param(raw: u32) -> u32 {
+    if (crate::config::ADVICE_TYPE_MIN..=crate::config::ADVICE_TYPE_MAX).contains(&raw) {
+        raw
+    } else {
+        crate::config::ADVICE_TYPE_DEFAULT
+    }
+}
 
 fn client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
@@ -143,14 +150,20 @@ pub async fn fetch(cfg: &AppConfig) -> Result<WeatherPayload, String> {
         &cfg.qweather_key,
         &cfg.location_id,
         &cfg.location_name,
+        cfg.weather_advice_type,
     )
     .await
 }
 
 /// Fetch weather from ad-hoc values that have not been saved yet - used by the
 /// "测试连接" button in the settings window.
-pub async fn probe(host: &str, key: &str, location_id: &str) -> Result<WeatherPayload, String> {
-    fetch_with(host, key, location_id, "").await
+pub async fn probe(
+    host: &str,
+    key: &str,
+    location_id: &str,
+    advice_type: u32,
+) -> Result<WeatherPayload, String> {
+    fetch_with(host, key, location_id, "", advice_type).await
 }
 
 pub async fn fetch_with(
@@ -158,6 +171,7 @@ pub async fn fetch_with(
     key: &str,
     location_id: &str,
     name_hint: &str,
+    advice_type: u32,
 ) -> Result<WeatherPayload, String> {
     if key.trim().is_empty() {
         return Err("未配置和风天气 API Key".to_string());
@@ -174,8 +188,10 @@ pub async fn fetch_with(
 
     let now_url = format!("{host}/v7/weather/now?location={loc}&key={key}");
     let daily_url = format!("{host}/v7/weather/7d?location={loc}&key={key}");
-    let advice_url =
-        format!("{host}/v7/indices/1d?type={TRAFFIC_INDEX}&location={loc}&key={key}");
+    let advice_url = format!(
+        "{host}/v7/indices/1d?type={}&location={loc}&key={key}",
+        advice_type_param(advice_type)
+    );
 
     // Three independent GETs - fire them together so the panel waits for one
     // round trip instead of three.

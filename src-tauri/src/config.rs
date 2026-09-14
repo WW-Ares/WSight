@@ -10,10 +10,33 @@ use std::fs;
 use std::path::PathBuf;
 
 pub const DEFAULT_HOST: &str = "https://devapi.qweather.com";
-pub const COLOR_CPU: &str = "#4aa8ff";
+/// Amber rather than the blue every other accent used to be: the disk capacity
+/// bars are blue too, and sharing one hue made the disk block read as a CPU
+/// figure. See `migrate_cpu_color` - existing configs get moved over once.
+pub const COLOR_CPU: &str = "#ff9f57";
 pub const COLOR_MEM: &str = "#52d3a4";
 pub const COLOR_GPU: &str = "#b98cff";
 pub const COLOR_NET: &str = "#67d3ff";
+/// The value `COLOR_CPU` had before it turned amber. Used only to recognise an
+/// untouched old config so it can be moved to the new default.
+pub const LEGACY_COLOR_CPU: &str = "#4aa8ff";
+
+/// QWeather lifestyle index ids (`/v7/indices/1d?type=`). 8 = 舒适度指数.
+pub const ADVICE_TYPE_DEFAULT: u32 = 8;
+pub const ADVICE_TYPE_MIN: u32 = 1;
+pub const ADVICE_TYPE_MAX: u32 = 16;
+
+/// How many forecast days the card shows, 3..7. Days beyond the visible
+/// columns scroll sideways.
+pub const WEATHER_DAYS_DEFAULT: u32 = 3;
+pub const WEATHER_DAYS_MIN: u32 = 3;
+pub const WEATHER_DAYS_MAX: u32 = 7;
+
+/// How many forecast cells the weather card lays out before it starts
+/// scrolling. `weatherDays` may ask for up to 7; this caps what is visible.
+pub const FORECAST_COLS_DEFAULT: u32 = 3;
+pub const FORECAST_COLS_MIN: u32 = 3;
+pub const FORECAST_COLS_MAX: u32 = 5;
 
 /// Width the front-end lays every widget out at, before `useStage` scales it.
 /// Must stay in sync with `BASE_WIDTH` in `src/shared/uiScale.ts`.
@@ -37,6 +60,13 @@ pub struct AppConfig {
     pub weather_refresh_min: u64,
     /// how many forecast rows the weather window shows (1..=7)
     pub weather_days: u32,
+    /// QWeather lifestyle index id rendered under the temperature; the `type=`
+    /// of `/v7/indices/1d`. 1..=16, default 8 (舒适度指数). The names behind
+    /// every id live on the front end so the settings window can list them.
+    pub weather_advice_type: u32,
+    /// How many forecast cells fit on one row before it scrolls sideways,
+    /// 3..=5. Anything beyond this count is reachable by scrolling.
+    pub weather_forecast_cols: u32,
     pub show_weather: bool,
 
     // ------------------------------------------------------------ monitor
@@ -92,6 +122,13 @@ pub struct AppConfig {
     // --------------------------------------------------------------- misc
     /// reserved: launch both widgets on login
     pub autostart: bool,
+
+    /// Diagnostic: when true the monitor window title carries the real
+    /// rendering fps and the observed snapshot interval. Not exposed in the
+    /// settings UI - flip `debugFps` in config.json by hand when chasing
+    /// "is it the frame rate or the sample rate" reports.
+    #[serde(default)]
+    pub debug_fps: bool,
 }
 
 impl Default for AppConfig {
@@ -102,7 +139,9 @@ impl Default for AppConfig {
             location_id: String::new(),
             location_name: String::new(),
             weather_refresh_min: 15,
-            weather_days: 3,
+            weather_days: WEATHER_DAYS_DEFAULT,
+            weather_advice_type: ADVICE_TYPE_DEFAULT,
+            weather_forecast_cols: FORECAST_COLS_DEFAULT,
             show_weather: true,
 
             monitor_interval_ms: 1000,
@@ -133,6 +172,7 @@ impl Default for AppConfig {
             weather_always_on_top: false,
 
             autostart: false,
+            debug_fps: false,
         }
     }
 }
@@ -190,7 +230,10 @@ pub fn load() -> AppConfig {
     // defaults (empty API key, no city). Strip it before parsing.
     let cleaned = text.trim_start_matches('\u{feff}');
     match serde_json::from_str::<AppConfig>(cleaned) {
-        Ok(cfg) => cfg,
+        Ok(mut cfg) => {
+            migrate_cpu_color(&mut cfg);
+            cfg
+        }
         Err(err) => {
             eprintln!("[config] parse failed ({err}), falling back to defaults");
             AppConfig::default()
@@ -202,6 +245,16 @@ pub fn save(cfg: &AppConfig) -> Result<(), String> {
     let path = config_path();
     let text = serde_json::to_string_pretty(cfg).map_err(|e| e.to_string())?;
     fs::write(&path, text).map_err(|e| format!("write {}: {e}", path.display()))
+}
+
+/// The CPU accent used to be the same blue as the disk capacity bars, which
+/// made the disk block read as another CPU figure. A config saved before the
+/// change still carries that blue; move it to the new amber default. A colour
+/// the user picked themselves is left alone.
+fn migrate_cpu_color(cfg: &mut AppConfig) {
+    if cfg.color_cpu.trim().eq_ignore_ascii_case(LEGACY_COLOR_CPU) {
+        cfg.color_cpu = COLOR_CPU.to_string();
+    }
 }
 
 fn is_hex_color(value: &str) -> bool {
@@ -237,7 +290,13 @@ pub fn normalize_host(raw: &str) -> String {
 pub fn sanitize(cfg: &mut AppConfig) {
     cfg.monitor_interval_ms = cfg.monitor_interval_ms.clamp(500, 60_000);
     cfg.weather_refresh_min = cfg.weather_refresh_min.clamp(5, 720);
-    cfg.weather_days = cfg.weather_days.clamp(1, 7);
+    cfg.weather_days = cfg.weather_days.clamp(WEATHER_DAYS_MIN, WEATHER_DAYS_MAX);
+    if !(ADVICE_TYPE_MIN..=ADVICE_TYPE_MAX).contains(&cfg.weather_advice_type) {
+        cfg.weather_advice_type = ADVICE_TYPE_DEFAULT;
+    }
+    cfg.weather_forecast_cols = cfg
+        .weather_forecast_cols
+        .clamp(FORECAST_COLS_MIN, FORECAST_COLS_MAX);
     cfg.opacity = cfg.opacity.clamp(0.25, 1.0);
     cfg.radius = cfg.radius.clamp(0.0, 24.0);
     cfg.monitor_width = cfg.monitor_width.clamp(MIN_WIDTH, MAX_WIDTH);

@@ -8,6 +8,7 @@ import {
   REPO_URL,
 } from "../shared/about";
 import {
+  ADVICE_TYPES,
   DEFAULT_CONFIG,
   MAX_DRIVES,
   MAX_DISK_TILES,
@@ -880,14 +881,59 @@ export function SettingsPanel({ initial }: { initial: AppConfig }) {
             </select>
           </Row>
 
-          <Row label="预报天数" hint={`${draft.weatherDays} 天`}>
-            <input
-              type="range"
-              min={1}
-              max={7}
+          <Row
+            label="预报天数"
+            hint={`未来 ${draft.weatherDays} 天，多出来的横向滚动`}
+          >
+            <select
               value={draft.weatherDays}
               onChange={(e) => update({ weatherDays: Number(e.target.value) })}
-            />
+            >
+              {[3, 4, 5, 6, 7].map((v) => (
+                <option key={v} value={v}>
+                  {v} 天
+                </option>
+              ))}
+            </select>
+          </Row>
+
+          <Row
+            label="预报显示格数"
+            hint={`一行 ${draft.weatherForecastCols} 格，多出来的横向滚动`}
+          >
+            <select
+              value={draft.weatherForecastCols}
+              onChange={(e) =>
+                update({ weatherForecastCols: Number(e.target.value) })
+              }
+            >
+              {[3, 4, 5].map((v) => (
+                <option key={v} value={v}>
+                  {v} 格
+                </option>
+              ))}
+            </select>
+          </Row>
+
+          <Row
+            label="生活指数"
+            hint={`温度下方那句话 · ${
+              ADVICE_TYPES.find((t) => t.id === draft.weatherAdviceType)?.name ??
+              "舒适度指数"
+            }`}
+          >
+            <select
+              value={draft.weatherAdviceType}
+              onChange={(e) =>
+                update({ weatherAdviceType: Number(e.target.value) })
+              }
+            >
+              {ADVICE_TYPES.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.name}
+                </option>
+              ))}
+            </select>
           </Row>
         </Section>
 

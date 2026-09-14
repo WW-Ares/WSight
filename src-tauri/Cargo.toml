@@ -1,6 +1,6 @@
 [package]
 name = "wsight"
-version = "0.2.0"
+version = "0.3.0"
 description = "WSight - lightweight desktop widgets: hardware monitor panel + QWeather panel"
 authors = ["WSight"]
 edition = "2021"

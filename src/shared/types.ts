@@ -172,6 +172,10 @@ export interface AppConfig {
   weatherRefreshMin: number;
   /** how many forecast cells the weather window shows, 1..7 */
   weatherDays: number;
+  /** QWeather lifestyle index id rendered under the temperature, 1..16 */
+  weatherAdviceType: number;
+  /** forecast cells on one row before it scrolls sideways, 3..5 */
+  weatherForecastCols: number;
   showWeather: boolean;
 
   // ------------------------------------------------------------- monitor
@@ -231,6 +235,12 @@ export interface AppConfig {
   // ---------------------------------------------------------------- misc
   /** reserved: start both widgets on login */
   autostart: boolean;
+  /**
+   * Diagnostic: puts the real rendering fps and the observed snapshot
+   * interval into the monitor window's title. Flip `debugFps` in config.json
+   * by hand; deliberately absent from the settings UI.
+   */
+  debugFps: boolean;
 }
 
 /** Width bounds the settings sliders and the native clamps agree on. */
@@ -239,17 +249,54 @@ export const MAX_WIDGET_WIDTH = 640;
 /** Window height bounds - must match MAX_HEIGHT in src-tauri/src/config.rs. */
 export const MAX_WIDGET_HEIGHT = 900;
 
+/** How many forecast days the weather card may show - the setting's range. */
+export const WEATHER_DAYS_MIN = 3;
+export const WEATHER_DAYS_MAX = 7;
+/** Forecast cells on one row before the row scrolls sideways. */
+export const FORECAST_COLS_DEFAULT = 3;
+export const FORECAST_COLS_MIN = 3;
+export const FORECAST_COLS_MAX = 5;
+
 /** How many volume tiles the monitor's disk block holds. */
 export const MAX_DISK_TILES = 3;
 /** How many physical drives the monitor's throughput block holds. */
 export const MAX_DRIVES = 2;
 
 export const RING_DEFAULTS = {
-  cpu: "#4aa8ff",
+  cpu: "#ff9f57",
   mem: "#52d3a4",
   gpu: "#b98cff",
   net: "#67d3ff",
 } as const;
+
+/**
+ * Fill colour of the disk capacity bars. Deliberately *not* the CPU accent:
+ * sharing one hue made the disk block read as another CPU figure.
+ */
+export const DISK_BAR_COLOR = "#4aa8ff";
+
+/**
+ * The lifestyle indices QWeather exposes at `/v7/indices/1d?type=`, in id
+ * order. The user picks one; its `text` is the sentence under the temperature.
+ */
+export const ADVICE_TYPES: ReadonlyArray<{ id: number; name: string }> = [
+  { id: 1, name: "运动指数" },
+  { id: 2, name: "洗车指数" },
+  { id: 3, name: "穿衣指数" },
+  { id: 4, name: "钓鱼指数" },
+  { id: 5, name: "紫外线指数" },
+  { id: 6, name: "旅游指数" },
+  { id: 7, name: "花粉过敏指数" },
+  { id: 8, name: "舒适度指数" },
+  { id: 9, name: "感冒指数" },
+  { id: 10, name: "空气污染扩散指数" },
+  { id: 11, name: "空调开启指数" },
+  { id: 12, name: "太阳镜指数" },
+  { id: 13, name: "化妆指数" },
+  { id: 14, name: "晾晒指数" },
+  { id: 15, name: "交通指数" },
+  { id: 16, name: "防晒指数" },
+];
 
 export const DEFAULT_CONFIG: AppConfig = {
   qweatherKey: "",
@@ -258,6 +305,8 @@ export const DEFAULT_CONFIG: AppConfig = {
   locationName: "",
   weatherRefreshMin: 15,
   weatherDays: 3,
+  weatherAdviceType: 8,
+  weatherForecastCols: 3,
   showWeather: true,
 
   monitorIntervalMs: 1000,
@@ -288,6 +337,8 @@ export const DEFAULT_CONFIG: AppConfig = {
   weatherAlwaysOnTop: false,
 
   autostart: false,
+
+  debugFps: false,
 };
 
 export interface GeoCity {

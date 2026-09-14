@@ -29,10 +29,26 @@
 }
 
 .mon-disk-block {
-  padding-top: 10px;
+  /* Fixed height for the whole row: it used to grow with the throughput
+     block, so the window jumped whenever a second drive showed up. Every
+     child is centred in it, so the tiles and the drive figures share one
+     axis instead of hanging from the top. */
+  height: 64px;
+  padding: 6px;
+  align-items: center;
   /* Wider gutters than the gauge row: three captions sit shoulder to shoulder
      down here and they were running together at 2px. */
   column-gap: 9px;
+}
+
+/* The throughput block owns the right-most column - centred in the row's
+   fixed height rather than pinned to the top of it. */
+.disk-io-cell {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  height: 100%;
 }
 
 .mon-col-head {
@@ -185,42 +201,62 @@
   white-space: nowrap;
 }
 
-/* Read/write per physical drive. One column per drive so the two of them
-   share their three rows and the block ends up about as tall as the volume
-   tiles beside it. */
+/* Read/write per physical drive, stacked: a heading row and below it read and
+   write side by side. Centred as a group so the two drives sit level with the
+   volume tiles beside them rather than hanging from the top of the row. */
 .disk-io {
-  display: grid;
-  gap: 2px;
-  align-items: start;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 4px;
+  min-width: 0;
+  width: 100%;
 }
 
 .disk-io-item {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 3px;
+  gap: 1px;
   min-width: 0;
 }
 
+/* Smaller and tighter than the volume captions beside it: this is a label for
+   the two figures under it, and at the old size the pair of drives was the
+   tallest thing in the panel. */
 .disk-io-title {
   font-size: 9px;
+  line-height: 1.2;
   color: var(--fg-dim);
+  letter-spacing: 0.2px;
   white-space: nowrap;
   max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-/* Two drives share one column, so each gets ~50px: `读 358K/s` just fits, and
-   the ellipsis is the safety valve for a drive doing 12.3M/s. */
+/* The whole drive's width for one row now, so `读 108K/s  写 12M/s` fits
+   without an ellipsis even while a copy is running. */
 .disk-io-line {
+  display: flex;
+  justify-content: center;
+  align-items: baseline;
+  gap: 3px;
   font-size: 9.5px;
+  line-height: 1.2;
   color: var(--fg);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
   max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
+}
+
+/* The verb is quieter than the number: the eye wants the figure first. */
+.disk-io-op {
+  color: var(--fg-faint);
+}
+
+.disk-io-val {
+  color: var(--fg);
 }
 
 .monitor-error {

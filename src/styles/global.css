@@ -54,10 +54,13 @@ body {
   --panel-border: rgba(255, 255, 255, 0.12);
   --panel-hairline: rgba(255, 255, 255, 0.08);
   --ring-track: rgba(255, 255, 255, 0.16);
-  --accent-cpu: #4aa8ff;
+  --accent-cpu: #ff9f57;
   --accent-mem: #52d3a4;
   --accent-gpu: #b98cff;
   --accent-net: #67d3ff;
+  /* Capacity bars in the monitor's disk block. Fixed blue, never the CPU
+     accent - sharing a hue made the disk figures read as CPU figures. */
+  --accent-disk: #4aa8ff;
   --warn: #ffb448;
   --danger: #ff6b6b;
 }
@@ -70,6 +73,9 @@ body {
   --panel-border: rgba(0, 0, 0, 0.12);
   --panel-hairline: rgba(0, 0, 0, 0.08);
   --ring-track: rgba(0, 0, 0, 0.14);
+  /* A touch darker than the dark-theme blue so the bar keeps its contrast on
+     a near-white card. */
+  --accent-disk: #2f86d8;
 }
 
 /* --------------------------------------------------------------- stage
