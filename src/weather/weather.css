@@ -1,0 +1,168 @@
+/* ---------------------------------------------------------------- weather
+   Reference layout: everything is centred on the card's vertical axis - the
+   hero block, the advice sentence, the stats line and the forecast cells.
+   Inside the hero the reading itself is right-aligned against the icon.
+
+   The hero is deliberately tight: a big icon with three lines of air around it
+   used to eat a third of the card, so the icon, the reading and the feels-like
+   line now sit in one compact cluster with the surrounding padding pulled in. */
+.wx-now {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  padding: 6px 12px 1px;
+}
+
+.wx-now svg {
+  flex: 0 0 auto;
+}
+
+/* temperature + condition on top, feels-like underneath */
+.wx-now-main {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.wx-now-line {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.wx-temp {
+  font-size: 33px;
+  font-weight: 250;
+  line-height: 1.05;
+  letter-spacing: -1.2px;
+  font-variant-numeric: tabular-nums;
+}
+
+.wx-cond {
+  font-size: 12.5px;
+  font-weight: 620;
+  letter-spacing: 0.2px;
+  white-space: nowrap;
+}
+
+.wx-feels {
+  font-size: 10px;
+  color: var(--fg-dim);
+}
+
+/* the lifestyle sentence (和风 "交通指数"), wraps to two lines at base width */
+.wx-advice {
+  margin: 0;
+  padding: 4px 14px 2px;
+  font-size: 11px;
+  line-height: 1.7;
+  text-align: center;
+  color: var(--fg);
+}
+
+.wx-stats {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: baseline;
+  padding: 4px 12px 5px;
+  font-size: 11px;
+  color: var(--fg-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.wx-stats span + span::before {
+  content: "·";
+  margin: 0 6px;
+  color: var(--fg-faint);
+}
+
+/* ------------------------------------------------------------- forecast
+   Flex + percentage widths instead of a grid: a partial last row (5, 6 or 7
+   days) then stays centred instead of hugging the left edge. */
+.wx-daily {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  border-top: 1px solid var(--panel-hairline);
+  padding: 6px 8px 7px;
+}
+
+.wx-day-slot {
+  flex: 0 0 auto;
+  display: flex;
+  justify-content: center;
+}
+
+.wx-day {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 1px 1px;
+}
+
+.wx-day-name {
+  font-size: 11px;
+  color: var(--fg-dim);
+  white-space: nowrap;
+}
+
+.wx-day-temp {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* ------------------------------------------------------- loading / empty */
+.wx-hint {
+  min-height: 150px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  padding: 14px;
+  font-size: 11.5px;
+  color: var(--fg-dim);
+  text-align: center;
+  line-height: 1.75;
+}
+
+.wx-hint p {
+  margin: 0;
+}
+
+.hint-small {
+  font-size: 10.5px;
+  color: var(--fg-faint);
+}
+
+.weather-setup-btn {
+  margin-top: 10px;
+  padding: 5px 16px;
+  font-family: inherit;
+  font-size: 11.5px;
+  color: var(--fg);
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: border-color 140ms ease, background 140ms ease;
+}
+
+.weather-setup-btn:hover {
+  border-color: var(--accent-cpu);
+  background: rgba(255, 255, 255, 0.13);
+}
+
+:root[data-theme="light"] .weather-setup-btn {
+  background: rgba(0, 0, 0, 0.05);
+}
+
+:root[data-theme="light"] .weather-setup-btn:hover {
+  background: rgba(0, 0, 0, 0.09);
+}

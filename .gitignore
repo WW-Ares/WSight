@@ -1,0 +1,27 @@
+# --- dependencies / build output -------------------------------------------
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/
+*.exe
+*.msi
+*.nsis.zip
+
+# --- local environment (mirrors, sandbox tweaks - not part of the source) ---
+.npmrc
+.cargo/
+
+# --- local verification scratch ---------------------------------------------
+# Screenshots taken while checking a build, plus a config dump that contains a
+# real QWeather API key. Never commit this directory.
+.verify/
+
+# --- design reference copied from another product's UI ----------------------
+参考.png
+
+# --- OS / editor ------------------------------------------------------------
+.DS_Store
+Thumbs.db
+*.log
+.vscode/
+.idea/

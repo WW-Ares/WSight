@@ -1,0 +1,268 @@
+/* ---------- shared base for both floating widgets ---------- */
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+}
+
+body {
+  font-family: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI",
+    system-ui, sans-serif;
+  user-select: none;
+  cursor: default;
+}
+
+/* draggable surface (Tauri data attribute) */
+[data-tauri-drag-region] {
+  cursor: grab;
+}
+[data-tauri-drag-region]:active {
+  cursor: grabbing;
+}
+
+:root {
+  /* set from shared/uiScale.ts at runtime; the literal is only the pre-paint
+     fallback so the first frame is already the right size */
+  --stage-w: 300px;
+  --ui-scale: 1;
+  --radius: 14px;
+  /* Text ramp. The three levels are deliberately further apart than a normal
+     design system would put them: the card is translucent, so the wallpaper
+     behind it takes contrast away from every glyph. `--fg-dim` and
+     `--fg-faint` are bright (dark theme) / dark (light theme) enough to stay
+     readable even at the low end of the opacity slider. */
+  --fg: #f2f6fb;
+  --fg-dim: #bcc9d8;
+  --fg-faint: #93a4b6;
+  /* Card surface, kept as rgb + alpha on purpose: the opacity slider writes
+     `--panel-opacity` (see shared/theme.ts) and only this background reads it.
+     Fading via `opacity` on an ancestor would drag the text, the gauges and
+     the icons down with it. */
+  --panel-rgb: 19, 24, 33;
+  --panel-opacity: 0.92;
+  --panel-bg: rgba(var(--panel-rgb), var(--panel-opacity));
+  --panel-border: rgba(255, 255, 255, 0.12);
+  --panel-hairline: rgba(255, 255, 255, 0.08);
+  --ring-track: rgba(255, 255, 255, 0.16);
+  --accent-cpu: #4aa8ff;
+  --accent-mem: #52d3a4;
+  --accent-gpu: #b98cff;
+  --accent-net: #67d3ff;
+  --warn: #ffb448;
+  --danger: #ff6b6b;
+}
+
+:root[data-theme="light"] {
+  --fg: #0b1420;
+  --fg-dim: #39485a;
+  --fg-faint: #64748a;
+  --panel-rgb: 250, 252, 255;
+  --panel-border: rgba(0, 0, 0, 0.12);
+  --panel-hairline: rgba(0, 0, 0, 0.08);
+  --ring-track: rgba(0, 0, 0, 0.14);
+}
+
+/* --------------------------------------------------------------- stage
+   Everything is laid out at `--stage-w` px and then scaled by `--ui-scale`,
+   so the two widgets can be dragged to any size without ever reflowing.
+   `transform-origin: 0 0` anchors the card to the window's top-left corner. */
+.stage {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: var(--stage-w);
+  height: auto;
+  transform: scale(var(--ui-scale));
+  transform-origin: 0 0;
+}
+
+.panel {
+  width: 100%;
+  height: 100%;
+  border-radius: var(--radius);
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  color: var(--fg);
+  backdrop-filter: blur(14px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* --------------------------------------------------------- text legibility
+   A transparent window is composited without subpixel antialiasing, so glyphs
+   come out thinner than the same text on an opaque page, and the wallpaper
+   showing through the card steals contrast on top of that. A halo shadow
+   fixes both: dark in the dark theme so light text stays on top of a bright
+   wallpaper, white in the light theme so dark text survives a dark one. It
+   inherits, so one rule covers every string in both widgets. */
+.panel {
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6), 0 0 6px rgba(0, 0, 0, 0.32);
+}
+
+:root[data-theme="light"] .panel {
+  text-shadow: 0 1px 2px rgba(255, 255, 255, 0.92),
+    0 0 6px rgba(255, 255, 255, 0.62);
+}
+
+/* Small captions get one weight step more than they look like they need -
+   at 10~11px the difference between 400 and 500 is the difference between
+   "readable" and "squint" once the card is translucent. */
+.panel-sub,
+.ring-label,
+.ring-sub,
+.net-line,
+.wx-feels,
+.wx-stats,
+.wx-day-name,
+.wx-advice,
+.mi-key,
+.mi-val,
+.mi-text,
+.hint-small,
+.footer {
+  font-weight: 500;
+}
+
+.panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 12px 6px;
+  border-bottom: 1px solid var(--panel-hairline);
+  flex: 0 0 auto;
+}
+
+.panel-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0.3px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.panel-title svg {
+  flex: 0 0 auto;
+  opacity: 0.85;
+}
+
+.panel-sub {
+  font-size: 11px;
+  color: var(--fg-dim);
+  font-variant-numeric: tabular-nums;
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.panel-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+}
+
+.footer {
+  flex: 0 0 auto;
+  padding: 4px 10px 6px;
+  font-size: 10.5px;
+  color: var(--fg-faint);
+  display: flex;
+  justify-content: space-between;
+  font-variant-numeric: tabular-nums;
+}
+
+.drag-strip {
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 26px;
+}
+
+/* ------------------------------------------------------- right-click menu
+   Drawn by the widget itself (see shared/WidgetMenu.tsx) and positioned in
+   design px, so it scales along with the card and never gets clipped by a
+   window that is only as large as the panel. */
+.wmenu {
+  position: absolute;
+  z-index: 50;
+  padding: 5px 0;
+  border-radius: 9px;
+  background: rgba(var(--panel-rgb), 0.98);
+  border: 1px solid var(--panel-border);
+  box-shadow: 0 7px 20px rgba(0, 0, 0, 0.38);
+  backdrop-filter: blur(14px);
+}
+
+.wmenu-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  height: 23px;
+  padding: 0 10px;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--fg);
+  background: none;
+  border: 0;
+  text-align: left;
+  cursor: pointer;
+}
+
+.wmenu-item:hover {
+  background: rgba(255, 255, 255, 0.09);
+}
+
+/* the keyboard cursor: the menu takes focus when it opens, and the focused
+   row is the one Enter will activate */
+.wmenu-item:focus {
+  outline: none;
+  background: rgba(255, 255, 255, 0.13);
+}
+
+:root[data-theme="light"] .wmenu-item:focus {
+  background: rgba(0, 0, 0, 0.1);
+}
+
+:root[data-theme="light"] .wmenu-item:hover {
+  background: rgba(0, 0, 0, 0.07);
+}
+
+.wmenu-item.on span {
+  font-weight: 650;
+}
+
+.wmenu-tick {
+  flex: 0 0 12px;
+  font-style: normal;
+  font-size: 11px;
+  color: var(--accent-cpu);
+}
+
+/* ------------------------------------------------------------ adjust mode
+   The only state in which the window can be dragged or resized, so it has to
+   be obvious at a glance which mode you are in. */
+.panel.adjusting {
+  box-shadow: 0 0 0 1.5px var(--accent-cpu) inset;
+}
+
+.adjust-badge {
+  color: var(--accent-cpu);
+  font-weight: 620;
+}

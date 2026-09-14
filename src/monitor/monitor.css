@@ -1,0 +1,232 @@
+/* ---------------------------------------------------------------- monitor
+   Two stacked grids that share one column count: the gauges on top
+   (CPU / Mem / GPU / Net), and the disk block below - one tile per volume on
+   the left, the per-drive throughput in the right-most column. Letting both
+   grids use `repeat(cols, ...)` is what keeps every tile under a gauge no
+   matter which gauges are switched off. */
+.mon-grid {
+  display: grid;
+  align-items: start;
+  gap: 2px;
+  padding: 9px 6px 10px;
+}
+
+.mon-col,
+.disk-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+}
+
+/* Hairline between the gauges and the disk block. Inset so it stops short of
+   the panel edges the way the header rule does. */
+.mon-divider {
+  height: 1px;
+  margin: 0 9px;
+  background: var(--panel-hairline);
+}
+
+.mon-disk-block {
+  padding-top: 10px;
+  /* Wider gutters than the gauge row: three captions sit shoulder to shoulder
+     down here and they were running together at 2px. */
+  column-gap: 9px;
+}
+
+.mon-col-head {
+  font-size: 12.5px;
+  color: var(--fg-dim);
+  letter-spacing: 0.3px;
+  white-space: nowrap;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* One fixed height for the gauge and for the network rate pair, so the two
+   caption lines of all four columns land on the same baseline. */
+.mon-col-slot {
+  height: 50px;
+  width: 100%;
+  display: grid;
+  place-items: center;
+}
+
+/* The network column's first caption line is just the word `用量` - it labels
+   the totals underneath, so it takes the dim label treatment rather than the
+   bold figure treatment the other three columns use. */
+.mon-col-l1.net-total-label {
+  font-size: 10px;
+  color: var(--fg-dim);
+  letter-spacing: 0.3px;
+}
+
+/* The capacity line: `18.9/63.8G`, `4.00/3.70GHz`. 11px, not 11.5: the clock
+   pair is the longest thing that has to survive here. */
+.mon-col-l1 {
+  font-size: 11px;
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.1px;
+  white-space: nowrap;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The second line, deliberately a notch smaller: a column is only ~90px wide
+   and `交换0/4G · 2133MHz` has to survive there. */
+.mon-col-l2 {
+  font-size: 10px;
+  color: var(--fg-dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ring-graphic {
+  position: relative;
+  display: grid;
+  place-items: center;
+}
+
+.ring-value {
+  position: absolute;
+  font-size: 15px;
+  font-weight: 650;
+  /* line-height 1 keeps the line box hugging the digits: with the default
+     leading the number sits visibly low inside the gauge */
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.3px;
+}
+
+/* ------------------------------------------------------------ network rate
+   Sits in the slot a gauge would occupy, so the network column keeps the same
+   rhythm as the three gauges next to it. */
+.net-pair {
+  height: 50px;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 5px;
+}
+
+.net-line {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 2px;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.net-line b {
+  font-weight: 620;
+}
+
+.net-arrow {
+  font-style: normal;
+  font-size: 10px;
+  line-height: 1;
+}
+
+.net-arrow.down {
+  color: var(--accent-net);
+}
+
+.net-arrow.up {
+  color: #ffd479;
+}
+
+/* ------------------------------------------------------------- disk block */
+/* More air than a gauge column gets - three of these sit side by side. */
+.disk-tile {
+  gap: 5px;
+  padding: 0 4px;
+}
+
+.disk-name {
+  font-size: 11.5px;
+  color: var(--fg);
+  white-space: nowrap;
+}
+
+.disk-bar {
+  display: block;
+  /* Narrower than the column on purpose: the bar is a proportion cue, and at
+     full width it crowded the caption above it and the usage line below.
+     `width:100%` keeps it from overflowing whatever column it lands in. */
+  width: 100%;
+  max-width: 58px;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--ring-track);
+  overflow: hidden;
+}
+
+.disk-bar > i {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  transition: width 240ms linear;
+}
+
+.disk-usage {
+  font-size: 10px;
+  color: var(--fg-dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* Read/write per physical drive. One column per drive so the two of them
+   share their three rows and the block ends up about as tall as the volume
+   tiles beside it. */
+.disk-io {
+  display: grid;
+  gap: 2px;
+  align-items: start;
+}
+
+.disk-io-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+}
+
+.disk-io-title {
+  font-size: 9px;
+  color: var(--fg-dim);
+  white-space: nowrap;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Two drives share one column, so each gets ~50px: `读 358K/s` just fits, and
+   the ellipsis is the safety valve for a drive doing 12.3M/s. */
+.disk-io-line {
+  font-size: 9.5px;
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.monitor-error {
+  padding: 16px 12px;
+  font-size: 11px;
+  color: var(--danger);
+  line-height: 1.5;
+  text-align: center;
+}

@@ -1,0 +1,622 @@
+/* ---------------------------- settings window ---------------------------- */
+
+:root {
+  color-scheme: dark;
+  --st-bg: #0d1219;
+  --st-card: rgba(255, 255, 255, 0.045);
+  --st-line: rgba(255, 255, 255, 0.1);
+  --st-line-soft: rgba(255, 255, 255, 0.05);
+  --st-field: rgba(255, 255, 255, 0.06);
+  /* opaque twin of --st-field (= white 6% over --st-card over --st-bg), for the
+     <select> popup - see the note above the input rules */
+  --st-field-solid: #252a31;
+  --st-accent: #4f8cff;
+  --st-ok: #4ec9a0;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --st-bg: #eef1f6;
+  --st-card: #ffffff;
+  --st-line: rgba(0, 0, 0, 0.11);
+  --st-line-soft: rgba(0, 0, 0, 0.06);
+  --st-field: rgba(0, 0, 0, 0.045);
+  --st-field-solid: #f2f4f7;
+  --st-accent: #2f6fe4;
+  --st-ok: #1f9d76;
+}
+
+html,
+body,
+#root {
+  overflow: hidden;
+}
+
+body {
+  background: var(--st-bg);
+  color: var(--fg);
+  font-size: 13px;
+}
+
+.st {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+/* ------------------------------------------------------------------ head */
+
+.st-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 15px 18px 11px;
+}
+
+.st-head h1 {
+  margin: 0 0 3px;
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: 0.2px;
+}
+
+.st-head p {
+  margin: 0;
+  font-size: 11px;
+  color: var(--fg-faint);
+}
+
+/* Version chip beside the title. Tabular figures so `v0.2.0` -> `v0.10.0`
+   does not shift the layout when the minor number gains a digit. */
+.st-ver {
+  display: inline-block;
+  margin-left: 7px;
+  padding: 1px 6px;
+  border: 1px solid var(--st-line);
+  border-radius: 20px;
+  background: var(--st-field);
+  color: var(--fg-faint);
+  font-size: 10px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.2px;
+  vertical-align: 2px;
+}
+
+.st-status {
+  flex: 0 0 auto;
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--fg-dim);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.st-status.ok {
+  color: var(--st-ok);
+}
+
+.st-status.err {
+  color: var(--danger);
+}
+
+/* ------------------------------------------------------------------ body */
+
+.st-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 14px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.st-body::-webkit-scrollbar {
+  width: 9px;
+}
+
+.st-body::-webkit-scrollbar-thumb {
+  background: var(--st-line);
+  border-radius: 5px;
+}
+
+.st-body::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.st-card {
+  /* `flex-shrink: 0` is essential: `.st-body` is a scrollable flex column and
+     flex items shrink by default, which silently clipped the bottom rows of
+     every card (圆角 / 配色 / 采样间隔 all vanished). */
+  flex: 0 0 auto;
+  background: var(--st-card);
+  border: 1px solid var(--st-line);
+  border-radius: calc(var(--radius) + 1px);
+  overflow: hidden;
+}
+
+.st-card-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 9px 13px;
+  border-bottom: 1px solid var(--st-line-soft);
+}
+
+.st-card-head h2 {
+  margin: 0;
+  font-size: 12.5px;
+  font-weight: 650;
+}
+
+.st-card-head span {
+  font-size: 10.5px;
+  color: var(--fg-faint);
+}
+
+.st-card-body {
+  padding: 4px 13px 9px;
+}
+
+/* ------------------------------------------------------------------- row */
+
+.st-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 7px 0;
+}
+
+.st-row + .st-row {
+  border-top: 1px solid var(--st-line-soft);
+}
+
+.st-row-label {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.st-row-label span {
+  font-size: 12.5px;
+}
+
+.st-row-label em {
+  font-style: normal;
+  font-size: 10.5px;
+  color: var(--fg-faint);
+}
+
+.st-row-ctl {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* ---------------------------------------------------------------- inputs */
+
+/*
+ * NOTE the two field colours.
+ *
+ * `--st-field` is translucent, which is fine for text inputs. A <select> is NOT:
+ * Chromium paints the popup list with the element's own background-color, and
+ * when that colour has an alpha channel it gives up and falls back to the
+ * *platform* menu colour. On a light-mode Windows that is white, so the light
+ * option text ended up white-on-white - the dropdown looked empty until you
+ * happened to hover a row and the highlight made it readable.
+ * Give the select an opaque colour and the popup is drawn dark again.
+ */
+.st select {
+  background: var(--st-field-solid);
+}
+
+.st select option {
+  background-color: var(--st-field-solid);
+  color: var(--fg);
+}
+
+.st input[type="text"],
+.st input[type="password"],
+.st select {
+  border: 1px solid var(--st-line);
+  color: var(--fg);
+  border-radius: 7px;
+  padding: 5px 9px;
+  font-size: 12px;
+  font-family: inherit;
+  outline: none;
+  min-width: 0;
+  max-width: 100%;
+  user-select: text;
+}
+
+.st input[type="text"]:focus,
+.st input[type="password"]:focus,
+.st select:focus {
+  border-color: var(--st-accent);
+}
+
+.st input[type="range"] {
+  width: 158px;
+  max-width: 100%;
+  accent-color: var(--st-accent);
+}
+
+.st-inline {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.st-inline input[type="text"],
+.st-inline input[type="password"],
+.st-inline select {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* --------------------------------------------------------------- controls */
+
+.st-switch {
+  flex: 0 0 auto;
+  width: 38px;
+  height: 21px;
+  padding: 0;
+  border-radius: 11px;
+  border: 1px solid var(--st-line);
+  background: var(--st-field);
+  position: relative;
+  cursor: pointer;
+  transition: background 140ms ease, border-color 140ms ease;
+}
+
+.st-switch.on {
+  background: var(--st-accent);
+  border-color: transparent;
+}
+
+.st-switch-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+  transition: transform 140ms ease;
+}
+
+.st-switch.on .st-switch-knob {
+  transform: translateX(17px);
+}
+
+.st-seg {
+  display: flex;
+  border: 1px solid var(--st-line);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.st-seg button {
+  background: transparent;
+  border: 0;
+  color: var(--fg-dim);
+  padding: 5px 14px;
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 140ms ease, color 140ms ease;
+}
+
+.st-seg button.on {
+  background: var(--st-accent);
+  color: #fff;
+}
+
+/* ------------------------------------------------- disk picker chips */
+
+.st-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.st-chips-empty {
+  font-size: 11px;
+  color: var(--fg-faint);
+}
+
+.st-chip {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  min-width: 56px;
+  padding: 4px 9px;
+  border: 1px solid var(--st-line);
+  border-radius: 7px;
+  background: var(--st-field);
+  color: var(--fg-dim);
+  font-family: inherit;
+  cursor: pointer;
+  transition: border-color 140ms ease, background 140ms ease, color 140ms ease;
+}
+
+.st-chip:hover {
+  border-color: var(--st-accent);
+}
+
+.st-chip b {
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.st-chip span {
+  font-size: 10px;
+  color: var(--fg-faint);
+}
+
+.st-chip.on {
+  border-color: var(--st-accent);
+  background: var(--st-field-solid);
+  color: var(--st-accent);
+}
+
+.st-chip.on b {
+  color: var(--st-accent);
+}
+
+.st-chip.on span {
+  color: var(--fg-dim);
+}
+
+.st-colors {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.st-color {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  font-size: 10px;
+  color: var(--fg-faint);
+}
+
+.st-color input[type="color"] {
+  width: 36px;
+  height: 25px;
+  padding: 0;
+  border: 1px solid var(--st-line);
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.st-color input[type="color"]::-webkit-color-swatch-wrapper {
+  padding: 2px;
+}
+
+.st-color input[type="color"]::-webkit-color-swatch {
+  border: none;
+  border-radius: 4px;
+}
+
+.st-btn {
+  font-family: inherit;
+  font-size: 12px;
+  padding: 6px 13px;
+  border-radius: 8px;
+  border: 1px solid var(--st-line);
+  background: var(--st-field);
+  color: var(--fg);
+  cursor: pointer;
+  transition: border-color 140ms ease, background 140ms ease;
+}
+
+.st-btn:hover:not(:disabled) {
+  border-color: var(--st-accent);
+}
+
+.st-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.st-btn.small {
+  padding: 5px 10px;
+  font-size: 11.5px;
+  flex: 0 0 auto;
+}
+
+.st-btn.danger {
+  color: var(--danger);
+}
+
+.st-btn.danger:hover:not(:disabled) {
+  border-color: var(--danger);
+}
+
+/* --------------------------------------------------------------- preview */
+
+.st-preview {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 14px;
+  margin: 6px 0 4px;
+  background: var(--panel-bg);
+  border: 1px solid var(--st-line);
+  backdrop-filter: blur(10px);
+}
+
+.st-mini {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+
+.st-mini-graphic {
+  position: relative;
+  display: grid;
+  place-items: center;
+}
+
+.st-mini-value {
+  position: absolute;
+  font-size: 11px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+
+.st-mini-label {
+  font-size: 9.5px;
+  color: var(--fg-faint);
+  letter-spacing: 0.3px;
+}
+
+.st-preview-net {
+  margin-left: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  align-items: flex-end;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------------------------------------------------------------- extras */
+
+.st-note {
+  margin: 4px 0 2px;
+  font-size: 11px;
+  color: var(--fg-faint);
+  line-height: 1.5;
+}
+
+.st-note.warn {
+  color: var(--danger);
+}
+
+.st-note.ok {
+  color: var(--st-ok);
+}
+
+.st-cities {
+  list-style: none;
+  margin: 6px 0 3px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 156px;
+  overflow-y: auto;
+}
+
+.st-cities button {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  text-align: left;
+  background: var(--st-field);
+  border: 1px solid var(--st-line);
+  border-radius: 7px;
+  padding: 5px 9px;
+  color: var(--fg);
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.st-cities button:hover {
+  border-color: var(--st-accent);
+}
+
+.st-cities b {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.st-cities span {
+  font-size: 10px;
+  color: var(--fg-faint);
+}
+
+/* ------------------------------------------------------------------ foot */
+
+.st-foot {
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+  padding: 11px 14px 13px;
+  border-top: 1px solid var(--st-line);
+}
+
+/* Sits between the scrolling body and the button row: version on the left,
+   repo links on the right. `flex: 0 0 auto` matters - the body above it is the
+   only part allowed to scroll, and a shrinkable sibling would get squeezed. */
+.st-about {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 9px 16px;
+  border-top: 1px solid var(--st-line);
+}
+
+.st-about-line {
+  font-size: 10.5px;
+  color: var(--fg-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.st-links {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* A link that behaves like a button: no border until you hover it, so the row
+   stays quiet next to four filled action buttons. */
+.st-link {
+  padding: 3px 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: none;
+  color: var(--fg-dim);
+  font-size: 10.5px;
+  cursor: pointer;
+  transition: color 0.12s, background 0.12s, border-color 0.12s;
+}
+
+.st-link:hover {
+  border-color: var(--st-line);
+  background: var(--st-field);
+  color: var(--fg);
+}
+
+.st-link:active {
+  transform: translateY(1px);
+}

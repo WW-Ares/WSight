@@ -1,0 +1,54 @@
+[package]
+name = "wsight"
+version = "0.2.0"
+description = "WSight - lightweight desktop widgets: hardware monitor panel + QWeather panel"
+authors = ["WSight"]
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+name = "wsight_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# hardware sampling - pure syscalls, no PowerShell / no WMI polling
+sysinfo = "0.33"
+
+# NVIDIA GPU load / vram / temperature via NVML (graceful no-op on other GPUs)
+nvml-wrapper = "0.10"
+
+# QWeather REST client.
+# `gzip` is REQUIRED: devapi.qweather.com always answers with
+# `Content-Encoding: gzip` even when the client does not advertise it, so
+# without the feature `.json()` chokes on raw compressed bytes with
+# "error decoding response body".
+reqwest = { version = "0.12", default-features = false, features = [
+  "json",
+  "rustls-tls",
+  "gzip",
+] }
+tokio = { version = "1", features = ["rt-multi-thread", "time", "macros"] }
+
+[features]
+# The Tauri CLI turns this on for production builds. WITHOUT it `tauri-macros`
+# compiles with `dev: true`, and every window is pointed at `build.devUrl`
+# (http://localhost:1420) instead of the bundled assets -> the window shows
+# "ERR_CONNECTION_REFUSED / localhost 拒绝连接".
+# `cargo build --release` alone does NOT enable it - always build through
+# `pnpm tauri build` (or pass `--features custom-protocol` manually).
+# DO NOT REMOVE.
+custom-protocol = ["tauri/custom-protocol"]
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
