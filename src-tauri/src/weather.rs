@@ -66,6 +66,49 @@ pub struct WeatherPayload {
     pub advice: Option<WeatherAdvice>,
 }
 
+/// A payload plus the moment it was written, so the panel can tell "a minute
+/// old" from "yesterday" and grey the timestamp accordingly.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WeatherCache {
+    pub cached_at_ms: i64,
+    pub payload: WeatherPayload,
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// Persist the payload the panel will show on the next cold start.
+///
+/// A failure here must never break a refresh - the cache is an optimisation,
+/// so the error is logged and dropped.
+pub fn save_cache(path: &std::path::Path, payload: &WeatherPayload) {
+    let cache = WeatherCache {
+        cached_at_ms: now_ms(),
+        payload: payload.clone(),
+    };
+    match serde_json::to_string(&cache) {
+        Ok(text) => {
+            if let Err(e) = std::fs::write(path, text) {
+                eprintln!("[weather] cache write {}: {e}", path.display());
+            }
+        }
+        Err(e) => eprintln!("[weather] cache encode: {e}"),
+    }
+}
+
+/// Read the cache back. Any problem - missing file, half-written file, an
+/// older schema - simply means "no cache", which the front-end treats as a
+/// first run.
+pub fn load_cache(path: &std::path::Path) -> Option<WeatherCache> {
+    let text = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str::<WeatherCache>(&text).ok()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct GeoCity {

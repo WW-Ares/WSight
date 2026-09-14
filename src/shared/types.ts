@@ -158,6 +158,19 @@ export interface WeatherPayload {
   advice: WeatherAdvice | null;
 }
 
+/**
+ * A payload plus the moment it was stored. The weather window paints this
+ * before the first network round trip comes back, and greys the timestamp
+ * once it is old enough to be misleading.
+ */
+export interface WeatherCache {
+  cachedAtMs: number;
+  payload: WeatherPayload;
+}
+
+/** Older than this and the observation time is dimmed as a warning. */
+export const WEATHER_STALE_MS = 30 * 60 * 1000;
+
 export interface AppConfig {
   // ------------------------------------------------------------- weather
   /** QWeather API key */

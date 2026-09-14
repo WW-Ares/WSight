@@ -217,6 +217,77 @@
   background: rgba(255, 255, 255, 0.13);
 }
 
+/* ------------------------------------------------------------ live status */
+
+/* "更新中" in the header: a breathing dot plus the word. Sits where the
+   observation time normally is, so the header never changes width. */
+.wx-updating {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--fg-dim);
+}
+
+.wx-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent-disk);
+  animation: wx-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes wx-pulse {
+  0%,
+  100% {
+    opacity: 0.25;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+/* Dimmed once the payload on screen is older than WEATHER_STALE_MS. */
+.wx-stamp.is-stale {
+  color: var(--fg-faint);
+}
+
+/* -------------------------------------------------------------- skeleton */
+
+.wx-skeleton {
+  padding: 0 0 10px;
+}
+
+.wx-sk-line {
+  display: block;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.08);
+  animation: wx-pulse 1.4s ease-in-out infinite;
+}
+
+.wx-sk-circle {
+  display: block;
+  width: 46px;
+  height: 46px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.08);
+  animation: wx-pulse 1.4s ease-in-out infinite;
+}
+
+.wx-sk-circle.sm {
+  width: 26px;
+  height: 26px;
+}
+
+/* Mirrors `.wx-daily`, including its top hairline, so the skeleton is the
+   same height as the finished card. */
+.wx-day-row {
+  display: flex;
+  justify-content: space-around;
+  align-items: center;
+  border-top: 1px solid var(--panel-hairline);
+  padding: 8px 10px 0;
+}
+
 :root[data-theme="light"] .weather-setup-btn {
   background: rgba(0, 0, 0, 0.05);
 }

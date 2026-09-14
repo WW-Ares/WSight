@@ -1,3 +1,4 @@
+mod autostart;
 mod collector;
 mod config;
 mod native;
@@ -13,7 +14,7 @@ use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder
 
 use collector::{Collector, Snapshot};
 use config::AppConfig;
-use weather::{GeoCity, WeatherPayload};
+use weather::{GeoCity, WeatherCache, WeatherPayload};
 
 pub const SNAPSHOT_EVENT: &str = "monitor://snapshot";
 pub const WEATHER_EVENT: &str = "weather://payload";
@@ -299,6 +300,7 @@ async fn refresh_weather(app: &AppHandle) -> Result<WeatherPayload, String> {
     let cfg = read_config(app);
     match weather::fetch(&cfg).await {
         Ok(payload) => {
+            weather::save_cache(&config::weather_cache_path(), &payload);
             let _ = app.emit(WEATHER_EVENT, &payload);
             Ok(payload)
         }
@@ -384,12 +386,41 @@ fn save_config(
         });
     }
 
+    // The switch is in the same auto-saving form as everything else, so only
+    // touch the registry when the value really flipped.
+    if previous.autostart != next.autostart {
+        if let Err(e) = autostart::set(next.autostart) {
+            eprintln!("[autostart] {e}");
+        }
+    }
+
     Ok(next)
 }
 
 #[tauri::command]
 async fn fetch_weather(app: AppHandle) -> Result<WeatherPayload, String> {
     refresh_weather(&app).await
+}
+
+/// Last payload written to disk, if any.
+///
+/// The weather window calls this first: painting yesterday's reading straight
+/// away is much better than a blank card while the first round trip finishes.
+#[tauri::command]
+fn get_cached_weather() -> Option<WeatherCache> {
+    weather::load_cache(&config::weather_cache_path())
+}
+
+/// Turn the Windows `Run` entry on or off. Returns the state the registry
+/// actually reports, so a blocked write cannot leave the switch lying.
+#[tauri::command]
+fn set_autostart(enabled: bool) -> Result<bool, String> {
+    autostart::set(enabled)
+}
+
+#[tauri::command]
+fn get_autostart() -> bool {
+    autostart::is_enabled()
 }
 
 /// Test an unsaved key/host/city combo from the settings window.
@@ -800,8 +831,11 @@ fn spawn_collector(app: AppHandle) {
 /// Weather refresh loop - orders of magnitude slower than the monitor loop.
 fn spawn_weather(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
-        // small initial delay so the UI can paint first
-        tokio::time::sleep(Duration::from_millis(1200)).await;
+        // The weather window asks for its own refresh the moment it mounts, so
+        // this loop deliberately waits: firing 1.2s after launch used to spend
+        // a second QWeather call on data that had just arrived. The card is
+        // never blank in the meantime - it paints the on-disk cache.
+        tokio::time::sleep(Duration::from_secs(15)).await;
 
         loop {
             let cfg = read_config(&app);
@@ -907,6 +941,9 @@ pub fn run() {
             get_config,
             save_config,
             fetch_weather,
+            get_cached_weather,
+            set_autostart,
+            get_autostart,
             probe_weather,
             lookup_city,
             fit_widget_height,
@@ -946,6 +983,13 @@ pub fn run() {
             apply_saved_geometry(&handle, &cfg);
             apply_config(&handle, &cfg);
             apply_widget_behaviour(&handle, &cfg);
+
+            // Re-assert the Run entry on every launch: the value stores an
+            // absolute exe path, so moving the folder (or installing a new
+            // build elsewhere) would otherwise leave it pointing at nothing.
+            if let Err(e) = autostart::set(cfg.autostart) {
+                eprintln!("[autostart] {e}");
+            }
 
             // First run: no city configured yet -> open the settings window so
             // the user can finish the setup instead of staring at an empty

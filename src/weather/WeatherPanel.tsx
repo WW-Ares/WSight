@@ -3,12 +3,18 @@ import { api, onWeather, onWeatherError } from "../shared/api";
 import { useLiveConfig } from "../shared/useLiveConfig";
 import { useStage } from "../shared/uiScale";
 import { WidgetFrame } from "../shared/WidgetFrame";
-import type { AppConfig, WeatherDaily, WeatherPayload } from "../shared/types";
+import type {
+  AppConfig,
+  WeatherCache,
+  WeatherDaily,
+  WeatherPayload,
+} from "../shared/types";
 import {
   FORECAST_COLS_DEFAULT,
   FORECAST_COLS_MAX,
   WEATHER_DAYS_MAX,
   WEATHER_DAYS_MIN,
+  WEATHER_STALE_MS,
 } from "../shared/types";
 import { WeatherIcon } from "./WeatherIcon";
 import "./weather.css";
@@ -175,11 +181,54 @@ function SetupHint({
   );
 }
 
+/**
+ * Placeholder with the same proportions as the real card.
+ *
+ * It is only ever shown before the first payload exists (no cache, slow
+ * network). Matching the real layout keeps the window height steady, so the
+ * card does not resize the moment data arrives.
+ */
+function WeatherSkeleton() {
+  const line = (w: number | string, h = 11) => (
+    <span className="wx-sk-line" style={{ width: w, height: h }} />
+  );
+  return (
+    <div className="wx-skeleton">
+      <div className="wx-now">
+        <div className="wx-now-hero">
+          <span className="wx-sk-circle" />
+          <div className="wx-now-stack">
+            {line(58, 24)}
+            {line(40, 12)}
+          </div>
+        </div>
+        {line(66, 11)}
+      </div>
+      <div className="wx-advice">
+        {line("84%")}
+        {line("62%")}
+        {line("50%")}
+      </div>
+      {line("72%")}
+      {line("72%")}
+      <div className="wx-day-row">
+        <span className="wx-sk-circle sm" />
+        <span className="wx-sk-circle sm" />
+        <span className="wx-sk-circle sm" />
+      </div>
+    </div>
+  );
+}
+
 export function WeatherPanel({ config }: { config: AppConfig }) {
   const cfg = useLiveConfig(config);
   const [data, setData] = useState<WeatherPayload | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  /** when the payload on screen was stored/fetched, for the "old data" tint */
+  const [cachedAt, setCachedAt] = useState(0);
+  /** true while a network refresh is in flight (the header shows a dot) */
+  const [refreshing, setRefreshing] = useState(true);
 
   const days = data ? Math.min(Math.max(cfg.weatherDays || 3, WEATHER_DAYS_MIN), WEATHER_DAYS_MAX) : 0;
   const hasAdvice = Boolean(data?.advice?.text);
@@ -196,25 +245,46 @@ export function WeatherPanel({ config }: { config: AppConfig }) {
     let offWeather: (() => void) | undefined;
     let offError: (() => void) | undefined;
 
+    // Paint the stored payload first. This resolves from disk, so the card is
+    // full in the same frame the window appears instead of waiting out a
+    // QWeather round trip.
+    api
+      .getCachedWeather()
+      .then((cache: WeatherCache | null) => {
+        if (!alive || !cache?.payload) return;
+        setData(cache.payload);
+        setCachedAt(cache.cachedAtMs);
+        setLoading(false);
+      })
+      .catch(() => {
+        // no cache yet - the skeleton stays until the network answers
+      });
+
     api
       .fetchWeather()
       .then((w) => {
         if (!alive) return;
         setData(w);
+        setCachedAt(Date.now());
         setError(null);
       })
       .catch((e: unknown) => {
         if (alive) setError(String(e));
       })
       .finally(() => {
-        if (alive) setLoading(false);
+        if (alive) {
+          setLoading(false);
+          setRefreshing(false);
+        }
       });
 
     onWeather((w) => {
       if (!alive) return;
       setData(w);
+      setCachedAt(Date.now());
       setError(null);
       setLoading(false);
+      setRefreshing(false);
     }).then((u) => {
       offWeather = u;
     });
@@ -232,7 +302,7 @@ export function WeatherPanel({ config }: { config: AppConfig }) {
     };
   }, []);
 
-  const shell = (title: string, sub: string, body: ReactNode) => (
+  const shell = (title: string, sub: ReactNode, body: ReactNode) => (
     <WidgetFrame
       label="weather"
       variant="weather"
@@ -250,10 +320,18 @@ export function WeatherPanel({ config }: { config: AppConfig }) {
     </WidgetFrame>
   );
 
+  // Nothing on screen yet and nothing on disk: show the shape of the card
+  // rather than a blank rectangle, so the window does not jump when the data
+  // lands.
   if (loading && !data) {
-    return shell(cfg.locationName || "天气", "加载中…", (
-      <div className="wx-hint"><p>正在获取天气…</p></div>
-    ));
+    return shell(
+      cfg.locationName || "天气",
+      <span className="wx-updating">
+        <i className="wx-dot" />
+        加载中
+      </span>,
+      <WeatherSkeleton />,
+    );
   }
 
   // No data at all: explain why and offer a shortcut into the settings window.
@@ -284,9 +362,26 @@ export function WeatherPanel({ config }: { config: AppConfig }) {
   const hasMore = daily.length > cols;
   const adviceLines = wrapAdvice(data.advice?.text ?? "");
 
+  // A payload older than half an hour is still shown - it beats an empty card
+  // when the network is down - but its timestamp is dimmed so it cannot be
+  // mistaken for a live reading.
+  const stale = cachedAt > 0 && Date.now() - cachedAt > WEATHER_STALE_MS;
+  const sub = refreshing ? (
+    <span className="wx-updating">
+      <i className="wx-dot" />
+      更新中
+    </span>
+  ) : error ? (
+    "更新失败"
+  ) : (
+    <span className={stale ? "wx-stamp is-stale" : "wx-stamp"}>
+      {obsStamp(now.obsTime)}
+    </span>
+  );
+
   return shell(
     data.locationName || "天气",
-    error ? "更新失败" : obsStamp(now.obsTime),
+    sub,
     <>
       <div className="wx-now">
         <div className="wx-now-hero">

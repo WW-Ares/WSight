@@ -8,9 +8,6 @@ dependencies:
   '@tauri-apps/api':
     specifier: ^2.0.0
     version: 2.11.1
-  '@tauri-apps/plugin-store':
-    specifier: ^2.0.0
-    version: 2.4.4
   react:
     specifier: ^18.3.1
     version: 18.3.1
@@ -832,12 +829,6 @@ packages:
       '@tauri-apps/cli-win32-ia32-msvc': 2.11.4
       '@tauri-apps/cli-win32-x64-msvc': 2.11.4
     dev: true
-
-  /@tauri-apps/plugin-store@2.4.4:
-    resolution: {integrity: sha512-oxSMaj/QpVfJcBMYX5aOQV94fWvga0MwQMfD6TLlbK2dh+ShPWAzefd8HWXhvOKjPRJdGVAkW7ZGO76JzzjaDA==}
-    dependencies:
-      '@tauri-apps/api': 2.11.1
-    dev: false
 
   /@types/babel__core@7.20.5:
     resolution: {integrity: sha512-qoQprZvz5wQFJwMDqeseRXWv3rqMvhgpbXFfVyWhbx9X47POIA6i/+dXefEmZKoAgOaTdaIgNSMqMIU61yRyzA==}

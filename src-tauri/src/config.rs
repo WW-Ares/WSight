@@ -201,6 +201,12 @@ pub fn config_path() -> PathBuf {
     data_dir().join("config.json")
 }
 
+/// Last successful weather payload, so the panel can paint before the
+/// network answers.
+pub fn weather_cache_path() -> PathBuf {
+    data_dir().join("weather-cache.json")
+}
+
 fn legacy_config_path() -> PathBuf {
     roaming().join(LEGACY_DIR).join("config.json")
 }

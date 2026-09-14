@@ -36,6 +36,11 @@ reqwest = { version = "0.12", default-features = false, features = [
 ] }
 tokio = { version = "1", features = ["rt-multi-thread", "time", "macros"] }
 
+# Windows registry helpers for the auto-start `Run` key.
+# `reg.exe` was simpler but is blocked by some sandbox/AV policies; using the
+# Win32 API directly avoids spawning a child process and keeps quotes correct.
+winreg = "0.52"
+
 [features]
 # The Tauri CLI turns this on for production builds. WITHOUT it `tauri-macros`
 # compiles with `dev: true`, and every window is pointed at `build.devUrl`

@@ -937,6 +937,18 @@ export function SettingsPanel({ initial }: { initial: AppConfig }) {
           </Row>
         </Section>
 
+        <Section title="通用" desc="开机与窗口行为">
+          <Row
+            label="开机启动"
+            hint="登录 Windows 后自动打开两个悬浮窗"
+          >
+            <Toggle
+              checked={draft.autostart}
+              onChange={(v) => update({ autostart: v })}
+            />
+          </Row>
+        </Section>
+
         {testState ? (
           <p className={`st-note ${testState.kind === "err" ? "warn" : "ok"}`}>
             {testState.text}

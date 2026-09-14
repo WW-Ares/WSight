@@ -1,6 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { AppConfig, GeoCity, Snapshot, WeatherPayload } from "./types";
+import type {
+  AppConfig,
+  GeoCity,
+  Snapshot,
+  WeatherCache,
+  WeatherPayload,
+} from "./types";
 
 /** Event name emitted by the Rust collector thread on every successful sample. */
 export const SNAPSHOT_EVENT = "monitor://snapshot";
@@ -15,6 +21,9 @@ export const api = {
   getConfig: () => invoke<AppConfig>("get_config"),
   /** persist + apply; resolves with the sanitised config the app actually uses */
   saveConfig: (config: AppConfig) => invoke<AppConfig>("save_config", { config }),
+
+  /** last payload written to disk - null on a first run */
+  getCachedWeather: () => invoke<WeatherCache | null>("get_cached_weather"),
 
   /** force-refresh weather from QWeather */
   fetchWeather: () => invoke<WeatherPayload>("fetch_weather"),
@@ -68,6 +77,10 @@ export const api = {
    * way to launch an arbitrary local program.
    */
   openUrl: (url: string) => invoke<void>("open_url", { url }),
+
+  /** Launch both widgets on login (Windows per-user `Run` entry). */
+  setAutostart: (enabled: boolean) => invoke<boolean>("set_autostart", { enabled }),
+  getAutostart: () => invoke<boolean>("get_autostart"),
 };
 
 export function onSnapshot(cb: (s: Snapshot) => void): Promise<UnlistenFn> {
