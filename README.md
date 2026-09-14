@@ -4,6 +4,7 @@ Windows 桌面悬浮组件：**硬件监控面板 + 和风天气面板**。
 Tauri 2 + React 18 + Rust，两个无边框悬浮窗常驻桌面，托盘图标管理。
 
 ![监控面板](docs/screenshot-monitor.png)
+![天气面板](docs/screenshot-weather.png)
 
 ## 功能
 
