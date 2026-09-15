@@ -17,6 +17,7 @@ import {
   rateColor,
 } from "../shared/format";
 import { Ring } from "./components/Ring";
+import { snapshotFromCache } from "./monitorCache";
 import "./monitor.css";
 
 /**
@@ -140,12 +141,17 @@ function DriveIo({ drives }: { drives: DriveInfo[] }) {
   );
 }
 
-/* -------------------------------------------------------------- skeletons
-   Nothing is cached here: the panel simply owns its final shape during the
-   beat between the window appearing and the collector's first sample. The two
-   groups are independent - the gauge row and the disk block each mirror the
-   box they stand in, and both read the same switches as the real thing, so the
-   number of placeholders matches what is about to arrive. */
+/* -------------------------------------------------------------- placeholders
+   Two layers, in the order the panel walks through them.
+
+   First run (no cache on disk yet): the groups below simply own their final
+   shape during the beat before the collector's first sample. The gauge row and
+   the disk block are independent, and both read the same switches as the real
+   thing, so the number of placeholders matches what is about to arrive.
+
+   Every run after that: the panel opens on `monitor-cache.json` - real cores,
+   real installed memory, real volumes - with 0 in every field that has to be
+   measured. No skeleton is drawn at all, because nothing is missing a shape. */
 
 /**
  * One gauge column: heading chip, empty ring, two caption lines.
@@ -198,6 +204,15 @@ export function MonitorPanel({ config }: { config: AppConfig }) {
 
   const [snap, setSnap] = useState<Snapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /**
+   * True until the collector's first sample, even when the panel is already
+   * drawing remembered hardware. It is what keeps the gauges at their full
+   * placeholder ring and the measured figures at 0 - knowing the machine has
+   * 64 GB installed is not the same as having measured how much is in use.
+   */
+  const [pending, setPending] = useState(true);
+  /** set once a real sample lands, so a late cache read cannot overwrite it */
+  const liveRef = useRef(false);
   /** observed gap between the two most recent snapshots, for the fps probe */
   const snapGapRef = useRef(0);
   const lastSnapTsRef = useRef(0);
@@ -206,23 +221,40 @@ export function MonitorPanel({ config }: { config: AppConfig }) {
     let alive = true;
     let unlisten: (() => void) | undefined;
 
-    api
-      .getSnapshot()
-      .then((s) => {
-        if (alive) setSnap(s);
-      })
-      .catch((e: unknown) => {
-        if (alive) setError(String(e));
-      });
-
-    onSnapshot((s) => {
+    const takeLive = (s: Snapshot) => {
       // s.ts is the epoch millis of the sample - the honest interval.
       if (lastSnapTsRef.current) {
         snapGapRef.current = s.ts - lastSnapTsRef.current;
       }
       lastSnapTsRef.current = s.ts;
-      if (alive) setSnap(s);
-    }).then((u) => {
+      liveRef.current = true;
+      if (!alive) return;
+      setSnap(s);
+      setPending(false);
+    };
+
+    api
+      .getSnapshot()
+      .then((s) => {
+        if (s) takeLive(s);
+      })
+      .catch((e: unknown) => {
+        if (alive) setError(String(e));
+      });
+
+    // Paint the machine we already know about, before anything is measured.
+    // This races `getSnapshot` and the event below by design: the guard drops
+    // the cache whenever a live sample got there first.
+    api
+      .getMonitorCache()
+      .then((cached) => {
+        if (alive && cached && !liveRef.current) setSnap(snapshotFromCache(cached));
+      })
+      .catch(() => {
+        // No cache is a first run, not a failure - the placeholders cover it.
+      });
+
+    onSnapshot(takeLive).then((u) => {
       unlisten = u;
     });
 
@@ -297,12 +329,17 @@ export function MonitorPanel({ config }: { config: AppConfig }) {
   const net = snap?.nets[0] ?? null;
 
   const cpu = snap?.cpu;
-  const cpuTitle = cpu
-    ? `CPU ${cpu.load.toFixed(0)}% · ${cpu.cores} 核` +
-      (cpu.freqLiveMhz > 0
-        ? ` · 实时 ${(cpu.freqLiveMhz / 1000).toFixed(2)}GHz / 额定 ${(cpu.freqMhz / 1000).toFixed(2)}GHz`
-        : ` · ${(cpu.freqMhz / 1000).toFixed(2)}GHz`)
-    : "CPU";
+  // While pending, a tooltip may only say what is known for certain - the
+  // hardware. A "0%" in there would be read as a measurement when it is really
+  // the absence of one.
+  const cpuTitle = !cpu
+    ? "CPU"
+    : pending
+      ? `CPU ${cpu.cores} 核 · ${(cpu.freqMhz / 1000).toFixed(2)}GHz · 等待首次采样`
+      : `CPU ${cpu.load.toFixed(0)}% · ${cpu.cores} 核` +
+        (cpu.freqLiveMhz > 0
+          ? ` · 实时 ${(cpu.freqLiveMhz / 1000).toFixed(2)}GHz / 额定 ${(cpu.freqMhz / 1000).toFixed(2)}GHz`
+          : ` · ${(cpu.freqMhz / 1000).toFixed(2)}GHz`);
   // The gauge already shows the average, so the line below it answers the
   // other question: is one core pinned while the rest idle? `高/低` rather
   // than `最高/最低` - the column is only ~80px wide.
@@ -313,27 +350,33 @@ export function MonitorPanel({ config }: { config: AppConfig }) {
   const mem = snap?.mem;
   // Swap no longer has a caption line of its own, so the tooltip has to carry
   // it or the figure becomes unreachable.
-  const memTitle = mem
-    ? `内存 ${mem.percent.toFixed(0)}% · 已用 ${formatGb(mem.used)} / 共 ${formatGb(mem.total)}` +
-      ` · 可用 ${formatGb(mem.free)}` +
-      ` · 交换 ${formatGb(mem.swapUsed, 0)} / ${formatGb(mem.swapTotal, 0)}` +
-      (mem.speedMhz > 0 ? ` · ${mem.speedMhz}MHz` : "")
-    : "内存";
+  const memTitle = !mem
+    ? "内存"
+    : pending
+      ? `内存 共 ${formatGb(mem.total)}` +
+        (mem.speedMhz > 0 ? ` · ${mem.speedMhz}MHz` : "") +
+        " · 等待首次采样"
+      : `内存 ${mem.percent.toFixed(0)}% · 已用 ${formatGb(mem.used)} / 共 ${formatGb(mem.total)}` +
+        ` · 可用 ${formatGb(mem.free)}` +
+        ` · 交换 ${formatGb(mem.swapUsed, 0)} / ${formatGb(mem.swapTotal, 0)}` +
+        (mem.speedMhz > 0 ? ` · ${mem.speedMhz}MHz` : "");
   // The second memory line carries the DIMM speed on its own. It used to be
   // `交换0/4G·2133M` squeezed in beside it, but a column is ~75 CSS px wide
   // and both figures together never fitted; swap lives in the tooltip now.
   const memSub = mem && mem.speedMhz > 0 ? `${mem.speedMhz}MHz` : "--";
 
   const gpu = snap?.gpu;
-  const gpuTitle = gpu
-    ? `GPU ${gpu.load.toFixed(0)}% · ${gpu.name}` +
-      (gpu.tempC !== null ? ` · ${gpu.tempC.toFixed(0)}℃` : "") +
-      (gpu.powerW !== null ? ` · ${gpu.powerW.toFixed(0)}W` : "") +
-      (gpu.fanPercent >= 0 ? ` · 风扇 ${gpu.fanPercent.toFixed(0)}%` : "") +
-      (gpu.memTotal > 0
-        ? ` · 显存 ${formatGb(gpu.memUsed)}/${formatGb(gpu.memTotal)}`
-        : "")
-    : "GPU（无数据）";
+  const gpuTitle = !gpu
+    ? "GPU（无数据）"
+    : pending
+      ? `GPU ${gpu.name} · 等待首次采样`
+      : `GPU ${gpu.load.toFixed(0)}% · ${gpu.name}` +
+        (gpu.tempC !== null ? ` · ${gpu.tempC.toFixed(0)}℃` : "") +
+        (gpu.powerW !== null ? ` · ${gpu.powerW.toFixed(0)}W` : "") +
+        (gpu.fanPercent >= 0 ? ` · 风扇 ${gpu.fanPercent.toFixed(0)}%` : "") +
+        (gpu.memTotal > 0
+          ? ` · 显存 ${formatGb(gpu.memUsed)}/${formatGb(gpu.memTotal)}`
+          : "");
   const gpuMem =
     gpu && gpu.memTotal > 0 ? formatGbPair(gpu.memUsed, gpu.memTotal) : "--";
   const gpuThermal = gpu
@@ -345,8 +388,9 @@ export function MonitorPanel({ config }: { config: AppConfig }) {
         .join(" · ") || "--"
     : "--";
 
-  // Before the first sample the two groups below draw their own placeholders;
-  // once it arrives they swap to the real thing without the panel resizing.
+  // Two flags, not one: `ready` says the panel has a shape to draw - from the
+  // cache or from a sample - and `pending` says the numbers in it are still
+  // the remembered ones. Once the first sample lands, both flip together.
   const ready = snap !== null;
   const showDiskBlock =
     showDisk && (!ready || tiles.length > 0 || drives.length > 0);
@@ -357,7 +401,7 @@ export function MonitorPanel({ config }: { config: AppConfig }) {
       variant="monitor"
       stageRef={stageRef}
       title="WSight"
-      sub={ready ? formatUptime(snap.uptimeSec) : "启动中…"}
+      sub={!pending && snap ? formatUptime(snap.uptimeSec) : "启动中…"}
       onTop={cfg.monitorAlwaysOnTop}
     >
       {error && !snap ? (
@@ -380,6 +424,7 @@ export function MonitorPanel({ config }: { config: AppConfig }) {
                       color="var(--accent-cpu)"
                       ramp={ringRamp}
                       title={cpuTitle}
+                      pending={pending}
                     />
                   </div>
                   <span className="mon-col-l1">
@@ -398,6 +443,7 @@ export function MonitorPanel({ config }: { config: AppConfig }) {
                       color="var(--accent-mem)"
                       ramp={ringRamp}
                       title={memTitle}
+                      pending={pending}
                     />
                   </div>
                   <span className="mon-col-l1">
@@ -412,12 +458,13 @@ export function MonitorPanel({ config }: { config: AppConfig }) {
                       GPU
                     </span>
                     <div className="mon-col-slot">
-                      <Ring
-                        value={gpu?.load ?? 0}
-                        color="var(--accent-gpu)"
-                        ramp={ringRamp}
-                        title={gpuTitle}
-                      />
+                    <Ring
+                      value={gpu?.load ?? 0}
+                      color="var(--accent-gpu)"
+                      ramp={ringRamp}
+                      title={gpuTitle}
+                      pending={pending}
+                    />
                     </div>
                     <span className="mon-col-l1">{gpuMem}</span>
                     <span className="mon-col-l2">{gpuThermal}</span>

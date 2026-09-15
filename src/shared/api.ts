@@ -3,6 +3,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   AppConfig,
   GeoCity,
+  MonitorCache,
   Snapshot,
   WeatherCache,
   WeatherPayload,
@@ -17,6 +18,13 @@ export const CONFIG_EVENT = "config://changed";
 export const api = {
   /** latest cached snapshot (null until the first sample lands) */
   getSnapshot: () => invoke<Snapshot | null>("get_snapshot"),
+
+  /**
+   * Hardware facts from the previous session - null before the app has ever
+   * sampled. Lets the monitor panel draw rated clocks, installed memory and
+   * the disk layout while the live figures are still 0.
+   */
+  getMonitorCache: () => invoke<MonitorCache | null>("get_monitor_cache"),
 
   getConfig: () => invoke<AppConfig>("get_config"),
   /** persist + apply; resolves with the sanitised config the app actually uses */

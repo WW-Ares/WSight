@@ -112,6 +112,45 @@ export interface Snapshot {
   drives: DriveInfo[];
 }
 
+/**
+ * The half of a snapshot that survives a reboot, persisted to
+ * `monitor-cache.json` so the panel can open on the machine it is running on
+ * instead of on placeholders.
+ *
+ * Anything that has to be *measured* - load, free memory, throughput - is
+ * absent by design; the panel fills those with 0 until the first sample.
+ */
+export interface MonitorCache {
+  savedAtMs: number;
+  cpuBrand: string;
+  cpuCores: number;
+  /** rated clock; the live one is a measurement, so it is never stored */
+  cpuFreqMhz: number;
+  memTotal: number;
+  memSwapTotal: number;
+  memSpeedMhz: number;
+  gpu: { name: string; memTotal: number } | null;
+  /** the adapter that carried traffic last session */
+  netName: string | null;
+  disks: {
+    letter: string;
+    name: string;
+    mountPoint: string;
+    total: number;
+    /** kept: a volume's used space moves slowly enough to stay honest */
+    used: number;
+    percent: number;
+    isSsd: boolean | null;
+    device: number;
+  }[];
+  drives: {
+    device: number;
+    isSsd: boolean | null;
+    letters: string;
+    label: string;
+  }[];
+}
+
 export interface WeatherNow {
   obsTime: string;
   temp: string;

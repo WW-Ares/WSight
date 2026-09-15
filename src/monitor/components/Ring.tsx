@@ -11,6 +11,13 @@ interface RingProps {
   ramp?: number;
   /** native tooltip; defaults to the bare percentage */
   title?: string;
+  /**
+   * No live sample yet. The arc is drawn whole - the gauge is *present*, it
+   * just has nothing to report - at low opacity, and the percentage gives way
+   * to a dash. Drawing a confident 0% would be the one reading the gauge
+   * cannot honestly give before the first measurement.
+   */
+  pending?: boolean;
 }
 
 /**
@@ -38,10 +45,17 @@ export function Ring({
   color,
   ramp = 900,
   title,
+  pending = false,
 }: RingProps) {
   const radius = (size - stroke) / 2;
   const circumference = 2 * Math.PI * radius;
-  const eased = useEased(Number.isFinite(value) ? Math.max(0, Math.min(100, value)) : 0, ramp);
+  const eased = useEased(
+    Number.isFinite(value) ? Math.max(0, Math.min(100, value)) : 0,
+    ramp,
+  );
+  // Pending draws the full circle, so it needs no dash at all - and an
+  // omitted `stroke-dasharray` is the one form that cannot be mis-read as a
+  // partial arc by an odd `C 0` pair.
   const dash = (eased / 100) * circumference;
 
   return (
@@ -71,12 +85,18 @@ export function Ring({
           fill="none"
           stroke={color}
           strokeWidth={stroke}
-          strokeLinecap="round"
-          strokeDasharray={`${dash} ${circumference - dash}`}
+          strokeOpacity={pending ? "0.35" : undefined}
+          strokeLinecap={pending ? undefined : "round"}
+          strokeDasharray={pending ? undefined : `${dash} ${circumference - dash}`}
           transform={`rotate(-90 ${size / 2} ${size / 2})`}
         />
       </svg>
-      <span className="ring-value">{eased.toFixed(0)}</span>
+      <span
+        className="ring-value"
+        style={pending ? { color: "var(--fg-dim)", opacity: 0.55 } : undefined}
+      >
+        {pending ? "--" : eased.toFixed(0)}
+      </span>
     </div>
   );
 }

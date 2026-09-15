@@ -2,6 +2,7 @@ mod autostart;
 mod collector;
 mod config;
 mod launchlog;
+mod monitorcache;
 mod native;
 mod single_instance;
 mod weather;
@@ -16,6 +17,7 @@ use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder
 
 use collector::{Collector, Snapshot};
 use config::AppConfig;
+use monitorcache::MonitorCache;
 use weather::{GeoCity, WeatherCache, WeatherPayload};
 
 pub const SNAPSHOT_EVENT: &str = "monitor://snapshot";
@@ -352,6 +354,15 @@ fn show_settings(app: &AppHandle) -> Result<(), String> {
 #[tauri::command]
 fn get_snapshot(state: State<'_, AppState>) -> Option<Snapshot> {
     state.snapshot.lock().ok().and_then(|s| s.clone())
+}
+
+/// The hardware half of the last sample, read straight from disk. The monitor
+/// window calls this on mount so it can draw rated clocks, installed memory
+/// and the disk layout immediately, and show 0 for everything that has to be
+/// measured.
+#[tauri::command]
+fn get_monitor_cache() -> Option<MonitorCache> {
+    monitorcache::load(&config::monitor_cache_path())
 }
 
 #[tauri::command]
@@ -816,6 +827,11 @@ fn spawn_collector(app: AppHandle) {
     std::thread::spawn(move || {
         let mut collector = Collector::new();
         let mut last = Instant::now();
+        let cache_path = config::monitor_cache_path();
+        // Refreshed on the first sample of the session, then at most once a
+        // minute: what it holds barely moves, and it is only ever read during
+        // the second before the next first sample arrives.
+        let mut cache_written: Option<Instant> = None;
 
         loop {
             let interval_ms = read_config(&app).monitor_interval_ms;
@@ -841,6 +857,14 @@ fn spawn_collector(app: AppHandle) {
                 *guard = Some(snap.clone());
             }
             let _ = app.emit(SNAPSHOT_EVENT, &snap);
+
+            if cache_written
+                .map(|t| t.elapsed() >= Duration::from_secs(60))
+                .unwrap_or(true)
+            {
+                monitorcache::save(&cache_path, &snap);
+                cache_written = Some(Instant::now());
+            }
         }
     });
 }
@@ -955,6 +979,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_snapshot,
+            get_monitor_cache,
             get_config,
             save_config,
             fetch_weather,

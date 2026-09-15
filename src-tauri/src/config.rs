@@ -207,6 +207,13 @@ pub fn weather_cache_path() -> PathBuf {
     data_dir().join("weather-cache.json")
 }
 
+/// The slow-moving half of the last monitor sample - hardware facts and the
+/// disk layout - so the panel can paint its real numbers before the collector
+/// has produced anything.
+pub fn monitor_cache_path() -> PathBuf {
+    data_dir().join("monitor-cache.json")
+}
+
 fn legacy_config_path() -> PathBuf {
     roaming().join(LEGACY_DIR).join("config.json")
 }
