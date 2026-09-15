@@ -80,7 +80,7 @@ export function changelogSectionsSince(changelogText, newest, oldestExclusive = 
   const from = versions.indexOf(newest);
   if (from === -1) return null;
 
-  let to = versions.length; // exclusive
+  let to = from + 1; // exclusive；无起点时只取 newest 自己
   if (oldestExclusive) {
     const stop = versions.indexOf(oldestExclusive);
     if (stop === -1) return null;
