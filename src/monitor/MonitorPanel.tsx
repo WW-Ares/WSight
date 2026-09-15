@@ -7,7 +7,6 @@ import { WidgetFrame } from "../shared/WidgetFrame";
 import type { AppConfig, DiskInfo, DriveInfo, Snapshot } from "../shared/types";
 import { MAX_DISK_TILES, MAX_DRIVES } from "../shared/types";
 import {
-  formatBytes,
   formatClock,
   formatGb,
   formatGbPair,
@@ -15,6 +14,7 @@ import {
   formatUptime,
   rateColor,
 } from "../shared/format";
+import { Ellipsis } from "../shared/Ellipsis";
 import { Ring } from "./components/Ring";
 import { snapshotFromCache } from "./monitorCache";
 import {
@@ -76,13 +76,9 @@ function DiskTile({ disk }: { disk: DiskInfo }) {
   const width = Math.max(1.5, Math.min(100, used));
   const barColor =
     used >= 92 ? "var(--danger)" : used >= 78 ? "var(--warn)" : "var(--accent-disk)";
-  const label = disk.name ? `${letter}: ${disk.name}` : `${letter}:`;
 
   return (
-    <div
-      className="disk-tile"
-      title={`${label} · 已用 ${formatGb(disk.used)} / ${formatGb(disk.total)}`}
-    >
+    <div className="disk-tile">
       <span className="disk-name">磁盘 {letter}</span>
       <span className="disk-bar">
         <i style={{ width: `${width}%`, background: barColor }} />
@@ -120,16 +116,16 @@ function DriveIo({ drives }: { drives: DriveInfo[] }) {
   return (
     <div className="disk-io">
       {drives.map((drive) => (
-        <div
-          className="disk-io-item"
-          key={drive.device}
-          title={
-            `${kindLabel(drive)} ${drive.letters}` +
-            (drive.label ? ` · ${drive.label}` : "") +
-            `\n读 ${formatRateCompact(drive.readSec)} · 写 ${formatRateCompact(drive.writeSec)}`
-          }
-        >
-          <span className="disk-io-title">{driveHeading(drive)}</span>
+        <div className="disk-io-item" key={drive.device}>
+          <Ellipsis
+            className="disk-io-title"
+            text={
+              `${kindLabel(drive)} ${drive.letters}` +
+              (drive.label ? ` · ${drive.label}` : "")
+            }
+          >
+            {driveHeading(drive)}
+          </Ellipsis>
           <span className="disk-io-line">
             <span className="disk-io-op">读</span>
             <span className="disk-io-val">
@@ -337,42 +333,8 @@ export function MonitorPanel({ config }: { config: AppConfig }) {
   const net = snap?.nets[0] ?? null;
 
   const cpu = snap?.cpu;
-  // While pending, a tooltip may only say what is known for certain - the
-  // hardware. A "0%" in there would be read as a measurement when it is really
-  // the absence of one.
-  const cpuTitle = !cpu
-    ? "CPU"
-    : pending
-      ? `CPU ${cpu.cores} 核 · ${(cpu.freqMhz / 1000).toFixed(2)}GHz · 等待首次采样`
-      : `CPU ${cpu.load.toFixed(0)}% · ${cpu.cores} 核` +
-        (cpu.freqLiveMhz > 0
-          ? ` · 实时 ${(cpu.freqLiveMhz / 1000).toFixed(2)}GHz / 额定 ${(cpu.freqMhz / 1000).toFixed(2)}GHz`
-          : ` · ${(cpu.freqMhz / 1000).toFixed(2)}GHz`);
   const mem = snap?.mem;
-  // Swap no longer has a caption line of its own, so the tooltip has to carry
-  // it or the figure becomes unreachable.
-  const memTitle = !mem
-    ? "内存"
-    : pending
-      ? `内存 共 ${formatGb(mem.total)}` +
-        (mem.speedMhz > 0 ? ` · ${mem.speedMhz}MHz` : "") +
-        " · 等待首次采样"
-      : `内存 ${mem.percent.toFixed(0)}% · 已用 ${formatGb(mem.used)} / 共 ${formatGb(mem.total)}` +
-        ` · 可用 ${formatGb(mem.free)}` +
-        ` · 交换 ${formatGb(mem.swapUsed, 0)} / ${formatGb(mem.swapTotal, 0)}` +
-        (mem.speedMhz > 0 ? ` · ${mem.speedMhz}MHz` : "");
   const gpu = snap?.gpu;
-  const gpuTitle = !gpu
-    ? "GPU（无数据）"
-    : pending
-      ? `GPU ${gpu.name} · 等待首次采样`
-      : `GPU ${gpu.load.toFixed(0)}% · ${gpu.name}` +
-        (gpu.tempC !== null ? ` · ${gpu.tempC.toFixed(0)}℃` : "") +
-        (gpu.powerW !== null ? ` · ${gpu.powerW.toFixed(0)}W` : "") +
-        (gpu.fanPercent >= 0 ? ` · 风扇 ${gpu.fanPercent.toFixed(0)}%` : "") +
-        (gpu.memTotal > 0
-          ? ` · 显存 ${formatGb(gpu.memUsed)}/${formatGb(gpu.memTotal)}`
-          : "");
   const gpuMem =
     gpu && gpu.memTotal > 0 ? formatGbPair(gpu.memUsed, gpu.memTotal) : "--";
 
@@ -428,14 +390,14 @@ export function MonitorPanel({ config }: { config: AppConfig }) {
                       value={cpu?.load ?? 0}
                       color="var(--accent-cpu)"
                       ramp={ringRamp}
-                      title={cpuTitle}
                       pending={pending}
                     />
                   </div>
-                  <span className="mon-col-l1">
-                    {cpu ? formatClock(cpu.freqLiveMhz, cpu.freqMhz) : "--"}
-                  </span>
-                  {showL2 ? <span className="mon-col-l2">{l2Cpu}</span> : null}
+                  <Ellipsis
+                    className="mon-col-l1"
+                    text={cpu ? formatClock(cpu.freqLiveMhz, cpu.freqMhz) : "--"}
+                  />
+                  {showL2 ? <Ellipsis className="mon-col-l2" text={l2Cpu} /> : null}
                 </div>
 
                 <div className="mon-col">
@@ -447,14 +409,14 @@ export function MonitorPanel({ config }: { config: AppConfig }) {
                       value={mem?.percent ?? 0}
                       color="var(--accent-mem)"
                       ramp={ringRamp}
-                      title={memTitle}
                       pending={pending}
                     />
                   </div>
-                  <span className="mon-col-l1">
-                    {mem ? formatGbPair(mem.used, mem.total) : "--"}
-                  </span>
-                  {showL2 ? <span className="mon-col-l2">{l2Mem}</span> : null}
+                  <Ellipsis
+                    className="mon-col-l1"
+                    text={mem ? formatGbPair(mem.used, mem.total) : "--"}
+                  />
+                  {showL2 ? <Ellipsis className="mon-col-l2" text={l2Mem} /> : null}
                 </div>
 
                 {showGpu ? (
@@ -467,12 +429,11 @@ export function MonitorPanel({ config }: { config: AppConfig }) {
                       value={gpu?.load ?? 0}
                       color="var(--accent-gpu)"
                       ramp={ringRamp}
-                      title={gpuTitle}
                       pending={pending}
                     />
                     </div>
-                    <span className="mon-col-l1">{gpuMem}</span>
-                    {showL2 ? <span className="mon-col-l2">{l2Gpu}</span> : null}
+                    <Ellipsis className="mon-col-l1" text={gpuMem} />
+                    {showL2 ? <Ellipsis className="mon-col-l2" text={l2Gpu} /> : null}
                   </div>
                 ) : null}
 
@@ -480,7 +441,7 @@ export function MonitorPanel({ config }: { config: AppConfig }) {
                   <div className="mon-col">
                     {/* The adapter that carries the traffic names the column,
                         so the heading says which link these numbers belong to. */}
-                    <span className="mon-col-head">{net?.name ?? "--"}</span>
+                    <Ellipsis className="mon-col-head" text={net?.name ?? "--"} />
                     <div className="mon-col-slot">
                       <div className="net-pair">
                         <span className="net-line">
@@ -505,15 +466,7 @@ export function MonitorPanel({ config }: { config: AppConfig }) {
                         <span className="mon-col-l1 net-total-label">
                           {netLabel}
                         </span>
-                        <span
-                          className="mon-col-l2"
-                          title={
-                            `累计下行 ${formatBytes(net?.rxTotal ?? 0)}` +
-                            ` · 累计上行 ${formatBytes(net?.txTotal ?? 0)}`
-                          }
-                        >
-                          {l2Net}
-                        </span>
+                        <Ellipsis className="mon-col-l2" text={l2Net} />
                       </>
                     ) : null}
                   </div>

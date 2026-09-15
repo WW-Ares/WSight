@@ -75,6 +75,13 @@ export const api = {
   setWidgetAdjust: (label: "monitor" | "weather", adjusting: boolean) =>
     invoke<void>("set_widget_adjust", { label, adjusting }),
 
+  /**
+   * Shift a widget by a few logical pixels - the arrow-key nudge. Distances
+   * are logical, so a step is a step at any display scaling.
+   */
+  nudgeWidget: (label: "monitor" | "weather", dx: number, dy: number) =>
+    invoke<void>("nudge_widget", { label, dx, dy }),
+
   toggleWidget: (label: string, visible: boolean) =>
     invoke<void>("toggle_widget", { label, visible }),
   quitApp: () => invoke<void>("quit_app"),

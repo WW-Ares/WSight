@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode, type RefObject } from "react";
+import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api } from "./api";
 import { WidgetMenu } from "./WidgetMenu";
@@ -36,6 +36,16 @@ export function WidgetFrame({
 }: WidgetFrameProps) {
   const [adjusting, setAdjusting] = useState(false);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  /**
+   * Serialises arrow-key nudges.
+   *
+   * Each nudge is a round trip that reads the window's position and writes it
+   * back, so a burst of key repeats fired in parallel would all read the same
+   * starting point and land on top of each other, and holding a key down would
+   * move the widget far less than it should. Chaining them keeps every step
+   * counted.
+   */
+  const nudgeQueue = useRef<Promise<void>>(Promise.resolve());
 
   // Never leave the widget unlocked and floating if the window goes away
   // (reload, hot-reload during development, a crash in the webview).
@@ -87,6 +97,52 @@ export function WidgetFrame({
     };
   }, [menu]);
 
+  /**
+   * Arrow keys nudge the widget while 调整 is on.
+   *
+   * Dragging gets a widget to roughly the right place; placing it *exactly*
+   * there - level with the card next to it, or one hair off the screen edge -
+   * is a mouse-only job that never quite lands. A key press is one pixel,
+   * which is the resolution a pointer cannot give. `Shift` covers the case
+   * where the widget is simply in the wrong place.
+   *
+   * Suppressed while the right-click menu is open: that menu owns the arrow
+   * keys for moving between its items, and a widget sliding sideways every
+   * time the highlight moves would be absurd.
+   */
+  useEffect(() => {
+    if (!adjusting || menu) return;
+
+    const onKey = (event: KeyboardEvent) => {
+      const step = event.shiftKey ? 10 : 1;
+      let dx = 0;
+      let dy = 0;
+      switch (event.key) {
+        case "ArrowLeft":
+          dx = -step;
+          break;
+        case "ArrowRight":
+          dx = step;
+          break;
+        case "ArrowUp":
+          dy = -step;
+          break;
+        case "ArrowDown":
+          dy = step;
+          break;
+        default:
+          return;
+      }
+      event.preventDefault();
+      nudgeQueue.current = nudgeQueue.current
+        .then(() => api.nudgeWidget(label, dx, dy))
+        .catch(() => {});
+    };
+
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [adjusting, menu, label]);
+
   const toggleAdjust = () => {
     const next = !adjusting;
     setAdjusting(next);
@@ -119,7 +175,7 @@ export function WidgetFrame({
           <span className="panel-title">{title}</span>
           <span className="panel-sub">
             {adjusting ? (
-              <span className="adjust-badge">调整中 · 可拖动缩放</span>
+              <span className="adjust-badge">调整中 · 拖动或方向键</span>
             ) : (
               sub
             )}

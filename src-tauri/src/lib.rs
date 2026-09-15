@@ -80,6 +80,112 @@ const WIDTH_NOISE_PX: f64 = 12.0;
 /// Gap between the screen edge and a widget that has no remembered position.
 const CORNER_MARGIN: f64 = 40.0;
 
+// ------------------------------------------------------------------ snapping
+//
+// Two widgets that live on the same desktop are almost always meant to be
+// aligned: stacked in a column, side by side, or sharing an axis so they read
+// as one column of information. Doing that by hand is a pixel hunt, so a
+// widget being moved is drawn to its neighbour's edges the way a window
+// manager snaps to a screen edge.
+//
+// Five lines per axis, which covers everything the eye reads as "aligned":
+//   - the two near edges (top/left with top/left, bottom/right with
+//     bottom/right),
+//   - the two far edges (this widget's top against its neighbour's bottom, and
+//     the mirror image), which is "touching, flush, no gap",
+//   - the centres, for a stack of two different-sized cards on one axis.
+//
+// Only while 调整 is on: at rest the widgets are locked, so nothing can be
+// dragged into a position that would need snapping anyway.
+
+/// How close an edge has to be, in logical px, before it lets go and snaps.
+/// Small enough to be reached on purpose, large enough to be reached by
+/// accident - which is the whole point.
+const SNAP_PX: f64 = 14.0;
+
+/// Guards the move we make *because* of a snap from being read as the user
+/// moving the window again.
+static SNAPPING: AtomicBool = AtomicBool::new(false);
+
+/// A window's rectangle in logical px: `(x, y, w, h)`.
+fn widget_rect(win: &tauri::WebviewWindow) -> Option<(f64, f64, f64, f64)> {
+    let scale = win.scale_factor().ok()?;
+    let pos = win.outer_position().ok()?;
+    let size = win.outer_size().ok()?;
+    Some((
+        pos.x as f64 / scale,
+        pos.y as f64 / scale,
+        size.width as f64 / scale,
+        size.height as f64 / scale,
+    ))
+}
+
+/// Snap one axis: return the coordinate nearest to `cur` among the lines this
+/// widget could align to, or `cur` itself when none of them is close enough.
+fn snap_axis(cur: f64, len: f64, other: f64, other_len: f64) -> f64 {
+    let candidates = [
+        other,
+        other + other_len - len,
+        other + other_len,
+        other - len,
+        other + (other_len - len) / 2.0,
+    ];
+    let mut best = cur;
+    let mut best_gap = SNAP_PX;
+    for candidate in candidates {
+        let gap = (candidate - cur).abs();
+        // `<=` so a later, equally close line wins - they are ordered
+        // near-edge first, which is the alignment a user reaches for most.
+        if gap <= best_gap {
+            best_gap = gap;
+            best = candidate;
+        }
+    }
+    best
+}
+
+/// Pull a widget that is being moved onto its neighbour's alignment lines.
+///
+/// Called from the window event hook for every `Moved`. The guard matters:
+/// snapping moves the window, which emits another `Moved`, and without the
+/// flag that second event would run the whole calculation again from inside
+/// the first - harmless in effect, but a recursive call for no reason.
+fn snap_widget(window: &tauri::Window) {
+    let label = window.label();
+    if !is_adjusting(label) {
+        return;
+    }
+    if SNAPPING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+
+    let app = window.app_handle();
+    let neighbour_label = if label == "monitor" { "weather" } else { "monitor" };
+    let moved = app.get_webview_window(label).and_then(|moving| {
+        let other = app.get_webview_window(neighbour_label)?;
+        // A hidden neighbour is not on screen to align with - and its stored
+        // rectangle would be the last place it was seen, which is worse than
+        // no snapping at all.
+        if !other.is_visible().unwrap_or(false) {
+            return None;
+        }
+        let (x, y, w, h) = widget_rect(&moving)?;
+        let (ox, oy, ow, oh) = widget_rect(&other)?;
+        let nx = snap_axis(x, w, ox, ow);
+        let ny = snap_axis(y, h, oy, oh);
+        if (nx - x).abs() < 0.5 && (ny - y).abs() < 0.5 {
+            return None;
+        }
+        moving
+            .set_position(tauri::LogicalPosition::new(nx, ny))
+            .ok()?;
+        Some(())
+    });
+    let _ = moved;
+
+    SNAPPING.store(false, Ordering::SeqCst);
+}
+
 // --------------------------------------------------------------- z-order
 //
 // Tauri can float a window above everything (`set_always_on_top`) but has no
@@ -696,11 +802,40 @@ fn set_widget_adjust(app: AppHandle, label: String, adjusting: bool) -> Result<(
     adjusting_flag(&label).store(adjusting, Ordering::Relaxed);
     if adjusting {
         zorder::to_front(&win);
+        // Arrow-key nudging needs the keyboard, and the widgets are built
+        // without focus so they never steal it on launch. In 调整 mode the
+        // user has just asked to work on this window, so taking it is right.
+        let _ = win.set_focus();
     } else {
         let cfg = read_config(&app);
         apply_widget_level(&win, widget_always_on_top(&cfg, &label));
     }
     Ok(())
+}
+
+/// Shift a widget by a few logical pixels - the arrow-key nudge in 调整 mode.
+///
+/// Native rather than front-end driven: the position the webview can read is
+/// affected by its own transform and by DPI rounding, while `outer_position`
+/// is the real window rectangle. Going through it also means the move lands in
+/// the same `Moved` hook as a drag, so nudging snaps and is remembered exactly
+/// the way dragging is.
+#[tauri::command]
+fn nudge_widget(app: AppHandle, label: String, dx: f64, dy: f64) -> Result<(), String> {
+    if label != "monitor" && label != "weather" {
+        return Err(format!("未知窗口 {label}"));
+    }
+    if !dx.is_finite() || !dy.is_finite() {
+        return Err("位移无效".to_string());
+    }
+    let Some(win) = app.get_webview_window(&label) else {
+        return Err(format!("窗口 {label} 不存在"));
+    };
+    let Some((x, y, _, _)) = widget_rect(&win) else {
+        return Err("无法读取窗口位置".to_string());
+    };
+    win.set_position(tauri::LogicalPosition::new(x + dx, y + dy))
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -992,6 +1127,7 @@ pub fn run() {
             remember_widget_width,
             set_widget_width,
             reset_widget_positions,
+            nudge_widget,
             set_widget_always_on_top,
             set_widget_adjust,
             toggle_widget,
@@ -1010,7 +1146,12 @@ pub fn run() {
                     }
                 }
                 // Where the user leaves a widget is configuration, not state.
-                tauri::WindowEvent::Moved(pos) => remember_position(window, *pos),
+                // Snapping first, so what gets remembered is where the widget
+                // actually ended up rather than where the pointer left it.
+                tauri::WindowEvent::Moved(pos) => {
+                    snap_widget(window);
+                    remember_position(window, *pos);
+                }
                 _ => {}
             }
         })

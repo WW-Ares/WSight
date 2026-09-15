@@ -194,6 +194,12 @@
   transition: width 240ms linear;
 }
 
+/* Deliberately NOT clipped. A volume caption such as `175G / 1863G` is a
+   little wider than its centred column, and it reads better spilling a pixel
+   or two into the gutter beside it than being cut down with an ellipsis -
+   measured, not guessed: the same line went from legible to `175G / 18…` the
+   moment `overflow: hidden` was added here. The tile is centred, so what it
+   spills is symmetric, and nothing but empty gutter is under it. */
 .disk-usage {
   font-size: 10px;
   color: var(--fg-dim);

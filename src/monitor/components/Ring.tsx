@@ -9,8 +9,6 @@ interface RingProps {
   /** how long one sample's motion is spread over, in ms; ~90% of the
    * sampling interval keeps the needle moving almost continuously */
   ramp?: number;
-  /** native tooltip; defaults to the bare percentage */
-  title?: string;
   /**
    * No live sample yet. The arc is drawn whole - the gauge is *present*, it
    * just has nothing to report - at low opacity, and the percentage gives way
@@ -37,6 +35,12 @@ interface RingProps {
  * on every repaint of the stroked circle, and a gauge repaints every frame
  * now. A faint static halo ring gives back the glow at a fraction of the
  * cost - it never changes, so it rasterises once.
+ *
+ * No tooltip: the percentage is inside the gauge and always legible, and a
+ * card this small cannot afford a hover box over every element. What the
+ * figure means (rated clock, swap, VRAM) lives in the caption line below it -
+ * see `secondLine.ts` - and that line grows a tooltip of its own when it is
+ * too long to fit.
  */
 export function Ring({
   value,
@@ -44,7 +48,6 @@ export function Ring({
   stroke = 7,
   color,
   ramp = 900,
-  title,
   pending = false,
 }: RingProps) {
   const radius = (size - stroke) / 2;
@@ -59,7 +62,7 @@ export function Ring({
   const dash = (eased / 100) * circumference;
 
   return (
-    <div className="ring-graphic" style={{ width: size, height: size }} title={title}>
+    <div className="ring-graphic" style={{ width: size, height: size }}>
       <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
         <circle
           cx={size / 2}

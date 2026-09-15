@@ -740,7 +740,13 @@ export function SettingsPanel({ initial }: { initial: AppConfig }) {
             </div>
           </Row>
 
-          <Row label="窗口位置" hint="把悬浮窗拖到哪儿，下次就开在哪儿">
+          <Row
+            label="窗口位置"
+            hint={
+              "右键悬浮窗选「调整」后才能拖动；调整中方向键可微调 1px，按住 Shift 是 10px。" +
+              "两个悬浮窗靠近时自动磁吸：上下、左右边缘对齐与中心对齐都会吸附。位置会被记住，下次开在原处。"
+            }
+          >
             <button
               type="button"
               className="st-btn ghost small"

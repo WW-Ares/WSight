@@ -44,15 +44,24 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* The degree sign is wrapped only so it can be measured - the temperature
+   itself is unchanged, down to its letter-spacing. See the comment on
+   `degWidth` in WeatherPanel.tsx. */
+.wx-temp-deg {
+  display: inline-block;
+}
+
 .wx-cond {
   font-size: 13.5px;
   font-weight: 620;
   letter-spacing: 0.2px;
   line-height: 1.3;
   white-space: nowrap;
-  /* Centre under the temperature: the stack is as wide as the "32°" line, so
-     aligning the condition text within that same width keeps the temperature
-     where it is while moving the word itself to the middle. */
+  /* Centred on the temperature *digits*, not on `32°`. The stack is as wide
+     as the whole temperature line, so centring inside it would put the word
+     half a degree sign to the right; the panel reserves exactly that much
+     padding-right (measured, inline) to bring it back. The temperature keeps
+     its position either way - nothing here can move it. */
   text-align: center;
 }
 

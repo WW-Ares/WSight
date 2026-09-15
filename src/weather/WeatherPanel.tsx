@@ -1,4 +1,10 @@
-import { useEffect, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { api, onWeather, onWeatherError } from "../shared/api";
 import { useLiveConfig } from "../shared/useLiveConfig";
 import { useStage } from "../shared/uiScale";
@@ -230,6 +236,41 @@ export function WeatherPanel({ config }: { config: AppConfig }) {
   /** true while a network refresh is in flight (the header shows a dot) */
   const [refreshing, setRefreshing] = useState(true);
 
+  /**
+   * Advance width of the `°` glyph, measured rather than guessed.
+   *
+   * The condition text sits under the temperature and the two are meant to be
+   * centred on each other - but on the *digits*, not on `32°`. The degree sign
+   * has no width of its own to speak of and yet it still shifts the centre of
+   * the line by half its advance, which was enough to make the word visibly
+   * lean to the right. Measuring the glyph and reserving exactly that much
+   * padding on the condition line moves the word back by half of it, while
+   * the temperature block keeps the width it always had and does not move at
+   * all.
+   *
+   * Measured instead of hard-coded because the value depends on the face the
+   * system ends up picking (Segoe UI Variable, Segoe UI, a CJK fallback) - a
+   * constant would be wrong on somebody's machine.
+   */
+  const [degWidth, setDegWidth] = useState(0);
+  const degRef = useRef<HTMLSpanElement | null>(null);
+
+  useLayoutEffect(() => {
+    if (!data) return;
+    const el = degRef.current;
+    if (!el) return;
+    const measure = () => {
+      const w = el.offsetWidth;
+      setDegWidth((prev) => (Math.abs(prev - w) > 0.4 ? w : prev));
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    const fonts = (document as Document & { fonts?: FontFaceSet }).fonts;
+    fonts?.ready.then(measure).catch(() => {});
+    return () => observer.disconnect();
+  }, [data]);
+
   const days = data ? Math.min(Math.max(cfg.weatherDays || 3, WEATHER_DAYS_MIN), WEATHER_DAYS_MAX) : 0;
   const hasAdvice = Boolean(data?.advice?.text);
   // Re-fit whenever the panel's natural height changes for a non-resize
@@ -387,8 +428,20 @@ export function WeatherPanel({ config }: { config: AppConfig }) {
         <div className="wx-now-hero">
           <WeatherIcon code={now.icon} size={53} />
           <div className="wx-now-stack">
-            <span className="wx-temp">{now.temp}°</span>
-            <span className="wx-cond">{now.text}</span>
+            <span className="wx-temp">
+              {now.temp}
+              <span className="wx-temp-deg" ref={degRef}>
+                °
+              </span>
+            </span>
+            {/* The reserve is the measured degree sign, so the word centres on
+                the digits while the temperature keeps its exact position. */}
+            <span
+              className="wx-cond"
+              style={degWidth > 0 ? { paddingRight: degWidth } : undefined}
+            >
+              {now.text}
+            </span>
           </div>
         </div>
         <div className="wx-feels">体感 {now.feelsLike}°</div>
