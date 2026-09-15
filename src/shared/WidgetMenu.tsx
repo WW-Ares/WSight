@@ -7,9 +7,15 @@ const PAD = 5;
 
 type ActionKey = "adjusting" | "onTop" | "settings";
 
+/**
+ * Ordered by how often they are reached for: 置顶 is the everyday toggle,
+ * 调整 is the deliberate "I want to move this", 设置 is the rare one. The
+ * tick marks make the two toggles read as a pair even though 调整 sits
+ * between them and 设置 does not.
+ */
 const ITEMS: { key: ActionKey; label: string }[] = [
-  { key: "adjusting", label: "调整" },
   { key: "onTop", label: "置顶" },
+  { key: "adjusting", label: "调整" },
   { key: "settings", label: "设置…" },
 ];
 
