@@ -50,6 +50,10 @@
   letter-spacing: 0.2px;
   line-height: 1.3;
   white-space: nowrap;
+  /* Centre under the temperature: the stack is as wide as the "32°" line, so
+     aligning the condition text within that same width keeps the temperature
+     where it is while moving the word itself to the middle. */
+  text-align: center;
 }
 
 .wx-feels {

@@ -38,6 +38,21 @@ pub const FORECAST_COLS_DEFAULT: u32 = 3;
 pub const FORECAST_COLS_MIN: u32 = 3;
 pub const FORECAST_COLS_MAX: u32 = 5;
 
+/// What the second line under each gauge may show.
+///
+/// The settings window offers the same ids, so the two lists have to stay in
+/// step - a rename here without one there simply falls back to the default
+/// (see `sanitize`), which is the safe direction.
+pub const L2_CPU_DEFAULT: &str = "extremes";
+pub const L2_MEM_DEFAULT: &str = "speed";
+pub const L2_GPU_DEFAULT: &str = "thermal";
+pub const L2_NET_DEFAULT: &str = "total";
+
+pub const L2_CPU_OPTIONS: &[&str] = &["model", "extremes", "cores", "procs", "board"];
+pub const L2_MEM_OPTIONS: &[&str] = &["ddr", "speed", "sticks", "partno", "board"];
+pub const L2_GPU_OPTIONS: &[&str] = &["model", "thermal", "clocks", "fan", "board"];
+pub const L2_NET_OPTIONS: &[&str] = &["total", "ip", "link", "board"];
+
 /// Width the front-end lays every widget out at, before `useStage` scales it.
 /// Must stay in sync with `BASE_WIDTH` in `src/shared/uiScale.ts`.
 pub const BASE_WIDTH: f64 = 300.0;
@@ -84,6 +99,15 @@ pub struct AppConfig {
     /// Empty = the first two. A number that no longer exists is ignored, and a
     /// selection that resolves to nothing falls back to the automatic pair.
     pub monitor_drives: Vec<u32>,
+    /// Show the caption line under each gauge. Off drops the whole row - and
+    /// with it the network column's "用量" total, which is a caption of its
+    /// own rather than a second figure.
+    pub monitor_second_line: bool,
+    /// What that line says, per column: see `L2_*_OPTIONS`.
+    pub monitor_l2_cpu: String,
+    pub monitor_l2_mem: String,
+    pub monitor_l2_gpu: String,
+    pub monitor_l2_net: String,
 
     // --------------------------------------------------------- appearance
     /// dark | light
@@ -151,6 +175,11 @@ impl Default for AppConfig {
             monitor_show_disk: true,
             monitor_disks: Vec::new(),
             monitor_drives: Vec::new(),
+            monitor_second_line: true,
+            monitor_l2_cpu: L2_CPU_DEFAULT.to_string(),
+            monitor_l2_mem: L2_MEM_DEFAULT.to_string(),
+            monitor_l2_gpu: L2_GPU_DEFAULT.to_string(),
+            monitor_l2_net: L2_NET_DEFAULT.to_string(),
 
             theme: "dark".to_string(),
             opacity: 0.92,
@@ -283,6 +312,16 @@ fn fix_color(slot: &mut String, fallback: &str) {
     }
 }
 
+/// Keep a free-form config string inside the set of ids the UI offers.
+fn fix_choice(slot: &mut String, allowed: &[&str], fallback: &str) {
+    let value = slot.trim();
+    if !allowed.contains(&value) {
+        *slot = fallback.to_string();
+    } else if value.len() != slot.len() {
+        *slot = value.to_string();
+    }
+}
+
 /// Turn any user supplied host into a usable base URL.
 /// Accepts `devapi.qweather.com`, `https://api.qweather.com/`, ... and always
 /// returns something without a trailing slash.
@@ -323,6 +362,13 @@ pub fn sanitize(cfg: &mut AppConfig) {
     if cfg.theme != "light" && cfg.theme != "dark" {
         cfg.theme = "dark".to_string();
     }
+
+    // An id this build does not know - hand-edited config, or an option that
+    // was dropped - falls back to the default rather than rendering a blank.
+    fix_choice(&mut cfg.monitor_l2_cpu, L2_CPU_OPTIONS, L2_CPU_DEFAULT);
+    fix_choice(&mut cfg.monitor_l2_mem, L2_MEM_OPTIONS, L2_MEM_DEFAULT);
+    fix_choice(&mut cfg.monitor_l2_gpu, L2_GPU_OPTIONS, L2_GPU_DEFAULT);
+    fix_choice(&mut cfg.monitor_l2_net, L2_NET_OPTIONS, L2_NET_DEFAULT);
 
     fix_color(&mut cfg.color_cpu, COLOR_CPU);
     fix_color(&mut cfg.color_mem, COLOR_MEM);

@@ -15,13 +15,14 @@
 //!     from `native`, which is FFI only.
 
 use std::collections::{BTreeMap, HashMap};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use nvml_wrapper::enum_wrappers::device::TemperatureSensor;
+use nvml_wrapper::enum_wrappers::device::{Clock, TemperatureSensor};
 use nvml_wrapper::Nvml;
 use serde::{Deserialize, Serialize};
 use sysinfo::{
-    CpuRefreshKind, Disks, DiskKind, MemoryRefreshKind, Networks, RefreshKind, System,
+    CpuRefreshKind, Disks, DiskKind, MemoryRefreshKind, Networks, ProcessRefreshKind,
+    ProcessesToUpdate, RefreshKind, System,
 };
 
 use crate::native;
@@ -35,7 +36,10 @@ const UNKNOWN_DEVICE: u32 = u32::MAX;
 #[serde(rename_all = "camelCase")]
 pub struct CpuInfo {
     pub load: f32,
+    /// logical processors - what "20T" means on a 10-core part
     pub cores: usize,
+    /// physical cores, 0 when the platform will not say
+    pub physical_cores: usize,
     pub per_core: Vec<f32>,
     /// The rated clock reported by the OS. It never changes, and is only used
     /// as the denominator for [`Self::freq_live_mhz`].
@@ -58,6 +62,18 @@ pub struct MemInfo {
     pub swap_used: u64,
     /// Installed DDR speed in MHz, 0 when the firmware table is unreadable.
     pub speed_mhz: u32,
+    // The four fields below describe the DIMMs as fitted, not as measured:
+    // they come from the SMBIOS table and never change while the app runs, so
+    // the panel may show them the moment it starts.
+    /// "DDR4" etc., empty when the firmware does not say.
+    pub ddr_type: String,
+    /// how many populated slots
+    pub stick_count: u32,
+    /// capacity of one module in MB - modules are matched in practice, and one
+    /// number is all a ~75px column can hold
+    pub stick_mb: u64,
+    pub vendor: String,
+    pub part_no: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -73,6 +89,10 @@ pub struct GpuInfo {
     pub fan_percent: f32,
     /// board power draw in watts, `None` when the driver does not expose it
     pub power_w: Option<f32>,
+    /// core clock in MHz, 0 when the driver refuses the query
+    pub core_clock_mhz: u32,
+    /// memory clock in MHz, same caveat
+    pub mem_clock_mhz: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -83,6 +103,10 @@ pub struct NetInfo {
     pub tx_sec: f64,
     pub rx_total: u64,
     pub tx_total: u64,
+    /// IPv4 of this adapter, empty when the link is down or unconfigured
+    pub ipv4: String,
+    /// negotiated link speed in Mbit/s, 0 when the driver will not say
+    pub link_mbps: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -139,6 +163,13 @@ pub struct Snapshot {
     pub disks: Vec<DiskInfo>,
     /// One entry per physical drive, ordered by its first letter.
     pub drives: Vec<DriveInfo>,
+    /// Mainboard model from the firmware - `ROG MAXIMUS XII HERO (WI-FI)`.
+    /// Empty when the table will not say, which the UI renders as `--`.
+    pub board: String,
+    /// How many processes are running. Refreshed on a slower beat than the
+    /// rest: enumerating the process table every second would cost more than
+    /// the figure is worth.
+    pub proc_count: u32,
 }
 
 pub struct Collector {
@@ -153,7 +184,28 @@ pub struct Collector {
     /// mount point -> physical disk number. Resolved once: a disk cannot move
     /// to another slot while the app is running.
     volume_device: HashMap<String, u32>,
+    /// Mainboard model, read from the firmware once.
+    board: String,
+    /// Adapter names -> their IPv4 / link speed. Also read once: matching a
+    /// live adapter to this list every tick would buy nothing, since neither
+    /// the address nor the negotiated speed changes on a healthy link.
+    adapters: Vec<native::AdapterInfo>,
+    /// DIMM facts the firmware table handed over - type, count, module size,
+    /// maker and part number.
+    mem_ddr_type: String,
+    mem_stick_count: u32,
+    mem_stick_mb: u64,
+    mem_vendor: String,
+    mem_part_no: String,
+    /// Cached process count, refreshed on its own slower beat.
+    proc_count: u32,
+    proc_refreshed: Option<Instant>,
 }
+
+/// Walking the process table is the one genuinely expensive read in here -
+/// hundreds of entries for a number that changes slowly. Five seconds is
+/// often enough to be honest and cheap enough to be invisible.
+const PROC_REFRESH_MS: u128 = 5_000;
 
 /// Interfaces that are never worth showing: kernel pseudo-adapters only.
 const HARD_SKIP: &[&str] = &[
@@ -277,6 +329,33 @@ impl Collector {
             .collect();
         let volume_device = native::device_numbers(mount_points.iter().map(String::as_str));
 
+        // One read of the firmware table covers the DIMMs and the mainboard;
+        // both are as fixed as the hardware they describe.
+        let modules = native::memory_modules();
+        let stick_count = modules.len() as u32;
+        let stick_mb = modules.first().map(|m| m.size_mb).unwrap_or(0);
+        let ddr_type = modules
+            .iter()
+            .find_map(|m| (!m.type_name.is_empty()).then(|| m.type_name.clone()))
+            .unwrap_or_default();
+        let vendor = modules
+            .iter()
+            .find_map(|m| (!m.vendor.is_empty()).then(|| m.vendor.clone()))
+            .unwrap_or_default();
+        let part_no = modules
+            .iter()
+            .find_map(|m| (!m.part_no.is_empty()).then(|| m.part_no.clone()))
+            .unwrap_or_default();
+
+        sys.refresh_processes_specifics(
+            ProcessesToUpdate::All,
+            true,
+            // Only the count is wanted, so none of the per-process figures are
+            // refreshed - that is what keeps this read cheap.
+            ProcessRefreshKind::nothing(),
+        );
+        let proc_count = sys.processes().len() as u32;
+
         Self {
             sys,
             networks,
@@ -287,6 +366,15 @@ impl Collector {
             clock: native::CpuClock::new(),
             mem_speed_mhz: native::memory_speed_mhz(),
             volume_device,
+            board: native::motherboard(),
+            adapters: native::adapters(),
+            mem_ddr_type: ddr_type,
+            mem_stick_count: stick_count,
+            mem_stick_mb: stick_mb,
+            mem_vendor: vendor,
+            mem_part_no: part_no,
+            proc_count,
+            proc_refreshed: Some(Instant::now()),
         }
     }
 
@@ -334,6 +422,11 @@ impl Collector {
             .map(|mw| mw as f32 / 1000.0)
             .filter(|w| *w > 0.0);
 
+        // Both clocks are in MHz already. Laptop dGPUs in a low power state
+        // refuse the query, so 0 - rather than an error - is the miss value.
+        let core_clock_mhz = device.clock_info(Clock::Graphics).unwrap_or(0);
+        let mem_clock_mhz = device.clock_info(Clock::Memory).unwrap_or(0);
+
         Some(GpuInfo {
             name,
             load,
@@ -342,6 +435,8 @@ impl Collector {
             temp_c,
             fan_percent,
             power_w,
+            core_clock_mhz,
+            mem_clock_mhz,
         })
     }
 
@@ -390,11 +485,29 @@ impl Collector {
         let cpu = CpuInfo {
             load,
             cores: cpus.len(),
+            physical_cores: self.sys.physical_core_count().unwrap_or(0),
             per_core,
             freq_mhz: self.cpu_rated_mhz,
             freq_live_mhz,
             brand: self.cpu_brand.clone(),
         };
+
+        // The process table is the one read that is not worth doing every
+        // tick; the count from the previous walk is carried forward until the
+        // next one is due.
+        let due = self
+            .proc_refreshed
+            .map(|t| t.elapsed().as_millis() >= PROC_REFRESH_MS)
+            .unwrap_or(true);
+        if due {
+            self.sys.refresh_processes_specifics(
+                ProcessesToUpdate::All,
+                true,
+                ProcessRefreshKind::nothing(),
+            );
+            self.proc_count = self.sys.processes().len() as u32;
+            self.proc_refreshed = Some(Instant::now());
+        }
 
         let mem = MemInfo {
             total,
@@ -404,6 +517,11 @@ impl Collector {
             swap_total: self.sys.total_swap(),
             swap_used: self.sys.used_swap(),
             speed_mhz: self.mem_speed_mhz,
+            ddr_type: self.mem_ddr_type.clone(),
+            stick_count: self.mem_stick_count,
+            stick_mb: self.mem_stick_mb,
+            vendor: self.mem_vendor.clone(),
+            part_no: self.mem_part_no.clone(),
         };
 
         let dt_sec = (elapsed_ms as f64 / 1000.0).max(0.05);
@@ -411,12 +529,17 @@ impl Collector {
             .networks
             .iter()
             .filter(|(name, _)| !is_hard_skipped(name))
-            .map(|(name, data)| NetInfo {
-                name: name.to_string(),
-                rx_sec: data.received() as f64 / dt_sec,
-                tx_sec: data.transmitted() as f64 / dt_sec,
-                rx_total: data.total_received(),
-                tx_total: data.total_transmitted(),
+            .map(|(name, data)| {
+                let link = self.adapter_for(name);
+                NetInfo {
+                    name: name.to_string(),
+                    rx_sec: data.received() as f64 / dt_sec,
+                    tx_sec: data.transmitted() as f64 / dt_sec,
+                    rx_total: data.total_received(),
+                    tx_total: data.total_transmitted(),
+                    ipv4: link.map(|a| a.ipv4.clone()).unwrap_or_default(),
+                    link_mbps: link.map(|a| a.link_mbps).unwrap_or(0),
+                }
             })
             .collect();
 
@@ -505,7 +628,26 @@ impl Collector {
             nets,
             disks,
             drives,
+            board: self.board.clone(),
+            proc_count: self.proc_count,
         }
+    }
+
+    /// The adapter list entry belonging to a sysinfo interface name.
+    ///
+    /// sysinfo reports the friendly name Windows uses, so an exact match is
+    /// the normal case. The substring fallback covers the drivers that append
+    /// a suffix (`以太网 2` vs `以太网`), and a miss is simply "no address
+    /// known" rather than a reason to hide the column.
+    fn adapter_for(&self, name: &str) -> Option<&native::AdapterInfo> {
+        if let Some(exact) = self.adapters.iter().find(|a| a.name == name) {
+            return Some(exact);
+        }
+        let lower = name.to_lowercase();
+        self.adapters.iter().find(|a| {
+            let candidate = a.name.to_lowercase();
+            !candidate.is_empty() && (lower.contains(&candidate) || candidate.contains(&lower))
+        })
     }
 }
 

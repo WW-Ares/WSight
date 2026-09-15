@@ -49,23 +49,17 @@ body {
 .st-head {
   flex: 0 0 auto;
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 15px 18px 11px;
+  padding: 13px 18px 11px;
 }
 
 .st-head h1 {
-  margin: 0 0 3px;
+  margin: 0;
   font-size: 15px;
   font-weight: 650;
   letter-spacing: 0.2px;
-}
-
-.st-head p {
-  margin: 0;
-  font-size: 11px;
-  color: var(--fg-faint);
 }
 
 /* Version chip beside the title. Tabular figures so `v0.2.0` -> `v0.10.0`
@@ -174,21 +168,46 @@ body {
   border-top: 1px solid var(--st-line-soft);
 }
 
+/* One line, not two: the row's own value sits beside its name in dim
+   figures, and anything that needs a sentence lives in the `i` chip's
+   tooltip instead of underneath. */
 .st-row-label {
   flex: 0 0 auto;
   display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.st-row-label span {
+  align-items: center;
+  gap: 6px;
   font-size: 12.5px;
 }
 
-.st-row-label em {
-  font-style: normal;
-  font-size: 10.5px;
+.st-row-value {
+  font-size: 11px;
+  font-weight: 500;
   color: var(--fg-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The `ⓘ` chip. `help` rather than `pointer` because hovering is the whole
+   interaction - there is nothing to click. */
+.st-info {
+  flex: 0 0 auto;
+  width: 13px;
+  height: 13px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--st-line);
+  border-radius: 50%;
+  color: var(--fg-faint);
+  font-size: 9px;
+  font-style: normal;
+  font-weight: 700;
+  line-height: 1;
+  cursor: help;
+  transition: color 0.12s, border-color 0.12s;
+}
+
+.st-info:hover {
+  color: var(--st-accent);
+  border-color: var(--st-accent);
 }
 
 .st-row-ctl {
@@ -493,14 +512,40 @@ body {
   letter-spacing: 0.3px;
 }
 
-.st-preview-net {
+.st-preview-right {
   margin-left: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 7px;
+}
+
+.st-preview-net {
   display: flex;
   flex-direction: column;
   gap: 2px;
   align-items: flex-end;
   font-size: 11px;
   font-variant-numeric: tabular-nums;
+}
+
+/* ------------------------------------------------- second line options */
+
+/* Grouped so switching the row off dims all four pickers at once - they are
+   meaningless while the row is hidden, and a disabled <select> on its own
+   still reads as a choice the user failed to make. */
+.st-l2 {
+  display: flex;
+  flex-direction: column;
+}
+
+.st-l2.off {
+  opacity: 0.42;
+  pointer-events: none;
+}
+
+.st-l2 .st-row:first-child {
+  border-top: 1px solid var(--st-line-soft);
 }
 
 /* ---------------------------------------------------------------- extras */

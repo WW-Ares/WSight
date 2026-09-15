@@ -3,8 +3,10 @@
 export interface CpuInfo {
   /** total load percentage, 0..100 */
   load: number;
-  /** logical core count */
+  /** logical processors - the "20T" of a 10-core part */
   cores: number;
+  /** physical cores, 0 when the platform will not say */
+  physicalCores: number;
   /** per-core load percentages, 0..100 */
   perCore: number[];
   /**
@@ -36,6 +38,14 @@ export interface MemInfo {
   swapUsed: number;
   /** installed DDR speed in MHz, 0 when the firmware table is unreadable */
   speedMhz: number;
+  /** "DDR4" and friends; empty when the firmware does not say */
+  ddrType: string;
+  /** how many slots are populated */
+  stickCount: number;
+  /** capacity of one module in MB */
+  stickMb: number;
+  vendor: string;
+  partNo: string;
 }
 
 export interface GpuInfo {
@@ -52,6 +62,10 @@ export interface GpuInfo {
   fanPercent: number;
   /** board power draw in watts, null when the driver hides it */
   powerW: number | null;
+  /** core clock in MHz, 0 when the driver refuses the query */
+  coreClockMhz: number;
+  /** memory clock in MHz, 0 under the same caveat */
+  memClockMhz: number;
 }
 
 export interface NetInfo {
@@ -62,6 +76,10 @@ export interface NetInfo {
   /** cumulative bytes since boot */
   rxTotal: number;
   txTotal: number;
+  /** IPv4 of this adapter; empty when the link is down or unconfigured */
+  ipv4: string;
+  /** negotiated link speed in Mbit/s, 0 when the driver will not say */
+  linkMbps: number;
 }
 
 export interface DiskInfo {
@@ -110,7 +128,58 @@ export interface Snapshot {
   disks: DiskInfo[];
   /** one entry per physical drive, ordered by its first letter */
   drives: DriveInfo[];
+  /** mainboard model from the firmware; empty when the table will not say */
+  board: string;
+  /**
+   * Running process count. Refreshed every few seconds rather than every
+   * sample - enumerating the process table at 1 Hz is not worth the cost.
+   */
+  procCount: number;
 }
+
+/**
+ * What the caption line under each gauge may show. The ids are the contract
+ * with the backend: `src-tauri/src/config.rs` holds the same lists and drops
+ * anything it does not recognise back to the default.
+ */
+export const L2_CPU_OPTIONS = [
+  { id: "model", name: "CPU 型号" },
+  { id: "extremes", name: "核心高低占用" },
+  { id: "cores", name: "核心 / 线程" },
+  { id: "procs", name: "进程数" },
+  { id: "board", name: "主板型号" },
+] as const;
+
+export const L2_MEM_OPTIONS = [
+  { id: "ddr", name: "类型 + 频率" },
+  { id: "speed", name: "DDR 频率" },
+  { id: "sticks", name: "插槽 条数 × 单条" },
+  { id: "partno", name: "内存型号" },
+  { id: "board", name: "主板型号" },
+] as const;
+
+export const L2_GPU_OPTIONS = [
+  { id: "model", name: "GPU 型号" },
+  { id: "thermal", name: "温度 · 功耗" },
+  { id: "clocks", name: "核心 / 显存频率" },
+  { id: "fan", name: "温度 · 风扇" },
+  { id: "board", name: "主板型号" },
+] as const;
+
+export const L2_NET_OPTIONS = [
+  { id: "total", name: "累计用量" },
+  { id: "ip", name: "本机 IP" },
+  { id: "link", name: "链路速率" },
+  { id: "board", name: "主板型号" },
+] as const;
+
+/** The choice each column starts out on - the captions as they were before. */
+export const L2_DEFAULTS = {
+  cpu: "extremes",
+  mem: "speed",
+  gpu: "thermal",
+  net: "total",
+} as const;
 
 /**
  * The half of a snapshot that survives a reboot, persisted to
@@ -124,14 +193,26 @@ export interface MonitorCache {
   savedAtMs: number;
   cpuBrand: string;
   cpuCores: number;
+  /** physical cores, for the `10C 20T` caption */
+  cpuPhysicalCores: number;
   /** rated clock; the live one is a measurement, so it is never stored */
   cpuFreqMhz: number;
   memTotal: number;
   memSwapTotal: number;
   memSpeedMhz: number;
+  memDdrType: string;
+  memStickCount: number;
+  memStickMb: number;
+  memVendor: string;
+  memPartNo: string;
   gpu: { name: string; memTotal: number } | null;
   /** the adapter that carried traffic last session */
   netName: string | null;
+  /** its negotiated link speed - but never its address, which belongs to one
+   *  session and would be worse than blank if it came back stale */
+  netLinkMbps: number;
+  /** mainboard model, for the "board" caption option */
+  board: string;
   disks: {
     letter: string;
     name: string;
@@ -245,6 +326,17 @@ export interface AppConfig {
   monitorDisks: string[];
   /** physical disk numbers the throughput block shows; empty = first two */
   monitorDrives: number[];
+  /**
+   * Draw the caption line under each gauge. Off drops the whole row - including
+   * the network column's "用量" total, which is a caption rather than a
+   * second figure - and the panel gets shorter.
+   */
+  monitorSecondLine: boolean;
+  /** What each column's caption says; see `L2_*_OPTIONS`. */
+  monitorL2Cpu: string;
+  monitorL2Mem: string;
+  monitorL2Gpu: string;
+  monitorL2Net: string;
 
   // ---------------------------------------------------------- appearance
   /** UI theme: dark | light */
@@ -368,6 +460,11 @@ export const DEFAULT_CONFIG: AppConfig = {
   monitorShowDisk: true,
   monitorDisks: [],
   monitorDrives: [],
+  monitorSecondLine: true,
+  monitorL2Cpu: L2_DEFAULTS.cpu,
+  monitorL2Mem: L2_DEFAULTS.mem,
+  monitorL2Gpu: L2_DEFAULTS.gpu,
+  monitorL2Net: L2_DEFAULTS.net,
 
   theme: "dark",
   opacity: 0.92,

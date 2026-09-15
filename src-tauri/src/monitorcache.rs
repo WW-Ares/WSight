@@ -48,21 +48,39 @@ pub struct GpuStatic {
     pub mem_total: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+/// `default` matters: a cache written by an older build is missing whatever
+/// fields that version did not have, and without it the whole file fails to
+/// parse - which would drop the panel back to its skeleton on every upgrade.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
 pub struct MonitorCache {
     pub saved_at_ms: i64,
     pub cpu_brand: String,
     pub cpu_cores: usize,
+    /// physical cores, for the `10C 20T` caption
+    pub cpu_physical_cores: usize,
     /// Rated clock. The live one is a measurement, so it is never stored.
     pub cpu_freq_mhz: u64,
     pub mem_total: u64,
     pub mem_swap_total: u64,
     pub mem_speed_mhz: u32,
+    /// The four DIMM facts below are properties of the hardware, so they are
+    /// as true after a reboot as before it - which is exactly what makes them
+    /// fit in a cache.
+    pub mem_ddr_type: String,
+    pub mem_stick_count: u32,
+    pub mem_stick_mb: u64,
+    pub mem_vendor: String,
+    pub mem_part_no: String,
     pub gpu: Option<GpuStatic>,
     /// The adapter that carried traffic last session, so the column already
     /// has its heading while the rates are still 0.
     pub net_name: Option<String>,
+    /// Its negotiated link speed. Not its address - an IP belongs to this
+    /// session, and a stale one would be worse than none.
+    pub net_link_mbps: u64,
+    /// Mainboard model, for the second line's "board" option.
+    pub board: String,
     pub disks: Vec<DiskStatic>,
     pub drives: Vec<DriveStatic>,
 }
@@ -80,15 +98,23 @@ pub fn from_snapshot(snap: &Snapshot) -> MonitorCache {
         saved_at_ms: now_ms(),
         cpu_brand: snap.cpu.brand.clone(),
         cpu_cores: snap.cpu.cores,
+        cpu_physical_cores: snap.cpu.physical_cores,
         cpu_freq_mhz: snap.cpu.freq_mhz,
         mem_total: snap.mem.total,
         mem_swap_total: snap.mem.swap_total,
         mem_speed_mhz: snap.mem.speed_mhz,
+        mem_ddr_type: snap.mem.ddr_type.clone(),
+        mem_stick_count: snap.mem.stick_count,
+        mem_stick_mb: snap.mem.stick_mb,
+        mem_vendor: snap.mem.vendor.clone(),
+        mem_part_no: snap.mem.part_no.clone(),
         gpu: snap.gpu.as_ref().map(|g| GpuStatic {
             name: g.name.clone(),
             mem_total: g.mem_total,
         }),
         net_name: snap.nets.first().map(|n| n.name.clone()),
+        net_link_mbps: snap.nets.first().map(|n| n.link_mbps).unwrap_or(0),
+        board: snap.board.clone(),
         disks: snap
             .disks
             .iter()

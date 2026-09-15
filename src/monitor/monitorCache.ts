@@ -20,6 +20,7 @@ export function snapshotFromCache(cache: MonitorCache): Snapshot {
     cpu: {
       load: 0,
       cores: cache.cpuCores,
+      physicalCores: cache.cpuPhysicalCores,
       perCore: [],
       freqMhz: cache.cpuFreqMhz,
       freqLiveMhz: 0,
@@ -33,6 +34,11 @@ export function snapshotFromCache(cache: MonitorCache): Snapshot {
       swapTotal: cache.memSwapTotal,
       swapUsed: 0,
       speedMhz: cache.memSpeedMhz,
+      ddrType: cache.memDdrType,
+      stickCount: cache.memStickCount,
+      stickMb: cache.memStickMb,
+      vendor: cache.memVendor,
+      partNo: cache.memPartNo,
     },
     gpu: cache.gpu
       ? {
@@ -43,6 +49,8 @@ export function snapshotFromCache(cache: MonitorCache): Snapshot {
           tempC: null,
           fanPercent: -1,
           powerW: null,
+          coreClockMhz: 0,
+          memClockMhz: 0,
         }
       : null,
     nets: cache.netName
@@ -53,6 +61,10 @@ export function snapshotFromCache(cache: MonitorCache): Snapshot {
             txSec: 0,
             rxTotal: 0,
             txTotal: 0,
+            // No address: an IP belongs to one session, and a stale one would
+            // read as a fact when it is really a memory.
+            ipv4: "",
+            linkMbps: cache.netLinkMbps,
           },
         ]
       : [],
@@ -78,5 +90,7 @@ export function snapshotFromCache(cache: MonitorCache): Snapshot {
       readSec: 0,
       writeSec: 0,
     })),
+    board: cache.board,
+    procCount: 0,
   };
 }

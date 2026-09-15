@@ -150,34 +150,128 @@ const SMBIOS_SIGNATURE: u32 = 0x5253_4D42;
 /// calls MHz, so it is passed through as-is. Returns 0 when the firmware table
 /// cannot be read, and the UI then simply omits the figure.
 pub fn memory_speed_mhz() -> u32 {
+    memory_modules()
+        .iter()
+        .map(|m| {
+            // A board that downclocks below the SPD's rating is running at the
+            // configured figure, so that one is the honest answer.
+            if m.configured_mhz > 0 {
+                m.configured_mhz
+            } else {
+                m.speed_mhz
+            }
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+/// One populated DIMM, straight out of an SMBIOS type-17 record.
+///
+/// Everything here is a property of the hardware: a module cannot change its
+/// part number mid-session, so the collector reads these once and the panel
+/// may show them before a single measurement has been taken.
+#[derive(Debug, Clone)]
+pub struct MemoryModule {
+    /// 0 only for an empty slot, which is filtered out entirely
+    pub size_mb: u64,
+    /// what the SPD advertises, 0 when the firmware omits it
+    pub speed_mhz: u32,
+    /// what the board is actually driving the module at
+    pub configured_mhz: u32,
+    /// "DDR4" and friends; empty when the byte says nothing useful
+    pub type_name: String,
+    pub vendor: String,
+    pub part_no: String,
+}
+
+/// Read the raw SMBIOS table. Empty when the firmware refuses to hand it over.
+fn read_smbios() -> Vec<u8> {
     // SAFETY: the first call only asks for the required size and passes a null
     // buffer; the second one passes a buffer of exactly that size.
     unsafe {
         let size = GetSystemFirmwareTable(SMBIOS_SIGNATURE, 0, std::ptr::null_mut(), 0);
         if size == 0 || size > 4 * 1024 * 1024 {
-            return 0;
+            return Vec::new();
         }
         let mut raw = vec![0u8; size as usize];
         let written = GetSystemFirmwareTable(SMBIOS_SIGNATURE, 0, raw.as_mut_ptr(), size);
         if written == 0 || written > size {
-            return 0;
+            return Vec::new();
         }
         raw.truncate(written as usize);
-        parse_memory_speed(&raw)
+        raw
     }
+}
+
+/// One structure of the table: its type, the fixed-area bytes, and the string
+/// table that trails them.
+struct SmbiosStruct {
+    kind: u8,
+    area: Vec<u8>,
+    strings: Vec<String>,
+}
+
+impl SmbiosStruct {
+    /// SMBIOS string indices are 1-based, and 0 means "not present" - so an
+    /// absent field really is absent rather than "the first string".
+    fn string(&self, offset: usize) -> &str {
+        let index = self.area.get(offset).copied().unwrap_or(0);
+        if index == 0 {
+            return "";
+        }
+        self.strings
+            .get(index as usize - 1)
+            .map(String::as_str)
+            .unwrap_or("")
+    }
+
+    fn u16(&self, offset: usize) -> u16 {
+        match self.area.get(offset..offset + 2) {
+            Some(b) => u16::from_le_bytes([b[0], b[1]]),
+            None => 0,
+        }
+    }
+
+    fn u32(&self, offset: usize) -> u32 {
+        match self.area.get(offset..offset + 4) {
+            Some(b) => u32::from_le_bytes([b[0], b[1], b[2], b[3]]),
+            None => 0,
+        }
+    }
+    fn byte(&self, offset: usize) -> u8 {
+        self.area.get(offset).copied().unwrap_or(0)
+    }
+}
+
+/// The string table after a structure: NUL separated, closed by an extra NUL.
+fn decode_strings(blob: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur: Vec<u8> = Vec::new();
+    for &b in blob {
+        if b == 0 {
+            out.push(String::from_utf8_lossy(&cur).trim().to_string());
+            cur.clear();
+        } else {
+            cur.push(b);
+        }
+    }
+    if !cur.is_empty() {
+        out.push(String::from_utf8_lossy(&cur).trim().to_string());
+    }
+    out
 }
 
 /// `RawSMBIOSData` is an 8 byte header (method, major, minor, revision, then a
 /// u32 length) followed by the structure table.
-fn parse_memory_speed(raw: &[u8]) -> u32 {
+fn parse_smbios(raw: &[u8]) -> Vec<SmbiosStruct> {
     if raw.len() < 8 {
-        return 0;
+        return Vec::new();
     }
     let table_len = u32::from_le_bytes([raw[4], raw[5], raw[6], raw[7]]) as usize;
     let end = (8 + table_len).min(raw.len());
     let table = &raw[8..end];
 
-    let mut best = 0u32;
+    let mut out = Vec::new();
     let mut i = 0usize;
     while i + 4 <= table.len() {
         let kind = table[i];
@@ -187,23 +281,7 @@ fn parse_memory_speed(raw: &[u8]) -> u32 {
         if len < 4 {
             break;
         }
-
-        // 17 = Memory Device. Offsets: 0x0C size in MB, 0x15 speed,
-        // 0x20 configured (i.e. actually running) speed.
-        if kind == 17 && len >= 0x17 {
-            let size_mb = u16::from_le_bytes([table[i + 0x0C], table[i + 0x0D]]);
-            let speed = u16::from_le_bytes([table[i + 0x15], table[i + 0x16]]) as u32;
-            let configured = if len >= 0x22 {
-                u16::from_le_bytes([table[i + 0x20], table[i + 0x21]]) as u32
-            } else {
-                0
-            };
-            // An empty slot reports a zero size, and the speed actually in use
-            // beats the SPD's rated one when the board downclocks.
-            if size_mb != 0 {
-                best = best.max(if configured > 0 { configured } else { speed });
-            }
-        }
+        let area = table[i..i + len].to_vec();
 
         // Each structure is followed by its string table, terminated by an
         // extra NUL; the next structure starts right after that pair.
@@ -211,9 +289,263 @@ fn parse_memory_speed(raw: &[u8]) -> u32 {
         while j + 1 < table.len() && !(table[j] == 0 && table[j + 1] == 0) {
             j += 1;
         }
+        let strings = decode_strings(&table[i + len..j.min(table.len())]);
+        out.push(SmbiosStruct {
+            kind,
+            area,
+            strings,
+        });
         i = j + 2;
     }
-    best
+    out
+}
+
+/// SMBIOS "Memory Type", type-17 offset 0x12. Anything not in here is either
+/// exotic or obsolete, and an empty string is more honest than a guess.
+fn memory_type_name(kind: u8) -> &'static str {
+    match kind {
+        0x12 => "DDR",
+        0x13 => "DDR2",
+        0x14 => "DDR2 FB",
+        0x18 => "DDR3",
+        0x1A => "DDR4",
+        0x1B => "LPDDR",
+        0x1C => "LPDDR2",
+        0x1D => "LPDDR3",
+        0x1E => "LPDDR4",
+        0x22 => "DDR5",
+        0x23 => "LPDDR5",
+        0x20 => "HBM",
+        0x21 => "HBM2",
+        _ => "",
+    }
+}
+
+/// Every populated memory slot. Empty when the firmware table is unreadable,
+/// which the callers treat as "unknown" rather than as an error.
+pub fn memory_modules() -> Vec<MemoryModule> {
+    let raw = read_smbios();
+    let mut out = Vec::new();
+
+    // 17 = Memory Device. Offsets: 0x0C size, 0x12 type, 0x15 speed,
+    // 0x17 manufacturer, 0x1A part number, 0x1C extended size,
+    // 0x20 configured speed.
+    for s in parse_smbios(&raw).iter().filter(|s| s.kind == 17) {
+        let raw_size = s.u16(0x0C);
+        let size_mb: u64 = match raw_size {
+            // 0 = nothing in the slot, 0xFFFF = the firmware will not say.
+            0 | 0xFFFF => 0,
+            // 0x7FFF means "too big for this field", and SMBIOS 2.7+ then
+            // carries the real figure in the dword below.
+            0x7FFF => (s.u32(0x1C) & 0x7FFF_FFFF) as u64,
+            // Bit 15 set switches the unit from MB to KB - a 512 MB module in
+            // a table that predates the wider field.
+            n if n & 0x8000 != 0 => ((n & 0x7FFF) as u64) / 1024,
+            n => n as u64,
+        };
+        if size_mb == 0 {
+            continue;
+        }
+
+        out.push(MemoryModule {
+            size_mb,
+            speed_mhz: s.u16(0x15) as u32,
+            configured_mhz: s.u16(0x20) as u32,
+            type_name: memory_type_name(s.byte(0x12)).to_string(),
+            vendor: s.string(0x17).to_string(),
+            part_no: s.string(0x1A).to_string(),
+        });
+    }
+    out
+}
+
+/// Mainboard model, from the SMBIOS type-2 record - `ROG MAXIMUS XII HERO
+/// (WI-FI)` on this machine.
+///
+/// Two candidate strings live there (maker and product) and the maker is the
+/// less useful one: a user recognises their board by its model, not by
+/// "ASUSTeK COMPUTER INC.". The maker is only used when the product is blank.
+pub fn motherboard() -> String {
+    let raw = read_smbios();
+    for s in parse_smbios(&raw).iter().filter(|s| s.kind == 2) {
+        let product = s.string(0x05);
+        if !product.is_empty() {
+            return product.to_string();
+        }
+        let maker = s.string(0x04);
+        if !maker.is_empty() {
+            return maker.to_string();
+        }
+    }
+    String::new()
+}
+
+// -------------------------------------------------------------- adapters
+
+#[repr(C)]
+struct SocketAddress {
+    sockaddr: *const u8,
+    len: i32,
+}
+
+/// Only the head of `IP_ADAPTER_UNICAST_ADDRESS` - the link to the next entry
+/// and the address itself. Everything after them is lifetime bookkeeping.
+#[repr(C)]
+struct IpAdapterUnicastAddress {
+    _length: u32,
+    _flags: u32,
+    next: *const IpAdapterUnicastAddress,
+    address: SocketAddress,
+}
+
+/// `IP_ADAPTER_ADDRESSES`, laid out only as far as the fields we read.
+///
+/// The MAC is 8 *bytes* here, not eight `WCHAR`s: the SDK header spells it
+/// `WCHAR PhysicalAddress[8]`, but every field after it then lands 8 bytes
+/// late - `IfType` reads as the interface index and the two link speeds come
+/// out as noise. Probed against this machine's six adapters; the offsets below
+/// are the ones that produce real `IfType` / `OperStatus` / link values.
+#[repr(C)]
+struct IpAdapterAddresses {
+    _length: u32,
+    _if_index: u32,
+    next: *const IpAdapterAddresses,
+    _adapter_name: *const u8,
+    first_unicast: *const IpAdapterUnicastAddress,
+    _first_anycast: *const c_void,
+    _first_multicast: *const c_void,
+    _first_dns: *const c_void,
+    _dns_suffix: *const u16,
+    _description: *const u16,
+    friendly_name: *const u16,
+    _physical_address: [u8; 8],
+    _physical_address_length: u32,
+    _flags: u32,
+    _mtu: u32,
+    if_type: u32,
+    oper_status: u32,
+    _ipv6_if_index: u32,
+    _zone_indices: [u32; 16],
+    _first_prefix: *const c_void,
+    transmit_link_speed: u64,
+    receive_link_speed: u64,
+}
+
+extern "system" {
+    fn GetAdaptersAddresses(
+        family: u32,
+        flags: u32,
+        reserved: *mut c_void,
+        adapters: *mut IpAdapterAddresses,
+        size: *mut u32,
+    ) -> u32;
+}
+
+/// A network adapter, as the second line of the network column may want it.
+#[derive(Debug, Clone)]
+pub struct AdapterInfo {
+    /// The friendly name Windows shows in the Control Panel. sysinfo reports
+    /// the same string, which is how a sample finds its adapter again.
+    pub name: String,
+    /// First IPv4 address, empty when the link is down or unconfigured.
+    pub ipv4: String,
+    /// Negotiated link speed in Mbit/s, 0 when the driver will not say.
+    pub link_mbps: u64,
+}
+
+/// SAFETY: `ptr` must be a NUL terminated UTF-16 string, or null.
+unsafe fn wide_to_string(ptr: *const u16) -> String {
+    if ptr.is_null() {
+        return String::new();
+    }
+    let mut len = 0usize;
+    while *ptr.add(len) != 0 {
+        len += 1;
+    }
+    String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len))
+}
+
+/// Every adapter that is currently up, IPv4 addresses included.
+pub fn adapters() -> Vec<AdapterInfo> {
+    const AF_INET: u32 = 2;
+    const ERROR_BUFFER_OVERFLOW: u32 = 111;
+    const IF_TYPE_SOFTWARE_LOOPBACK: u32 = 24;
+    const IF_OPER_STATUS_UP: u32 = 1;
+
+    let mut out = Vec::new();
+    // SAFETY: `buf` is a plain byte block of `size` bytes; the API writes a
+    // linked list of `IpAdapterAddresses` into it, and the pointers we follow
+    // stay inside that block.
+    unsafe {
+        let mut size: u32 = 16 * 1024;
+        for _ in 0..3 {
+            let mut buf = vec![0u8; size as usize];
+            let status = GetAdaptersAddresses(
+                AF_INET,
+                0,
+                std::ptr::null_mut(),
+                buf.as_mut_ptr() as *mut IpAdapterAddresses,
+                &mut size,
+            );
+            if status == ERROR_BUFFER_OVERFLOW {
+                continue;
+            }
+            if status != 0 {
+                return out;
+            }
+
+            let mut node: *const IpAdapterAddresses = buf.as_ptr() as *const _;
+            while !node.is_null() {
+                let a = &*node;
+                // A loopback address or a link that is down says nothing about
+                // the machine's connection, and would only crowd the list.
+                if a.oper_status == IF_OPER_STATUS_UP && a.if_type != IF_TYPE_SOFTWARE_LOOPBACK {
+                    out.push(AdapterInfo {
+                        name: wide_to_string(a.friendly_name),
+                        ipv4: first_ipv4(a.first_unicast),
+                        link_mbps: (a.transmit_link_speed / 1_000_000)
+                            .max(a.receive_link_speed / 1_000_000),
+                    });
+                }
+                node = a.next;
+            }
+            break;
+        }
+    }
+    out
+}
+
+/// `AF_INET` as it appears in the `sa_family` word of a `sockaddr_in`.
+const AF_INET_SOCKADDR: u16 = 2;
+
+/// Walk a unicast address list for the first IPv4 entry.
+fn first_ipv4(head: *const IpAdapterUnicastAddress) -> String {
+    let mut node = head;
+    while !node.is_null() {
+        // SAFETY: the list belongs to the buffer `adapters` owns, and every
+        // entry is followed by a sockaddr whose length we check before reading.
+        unsafe {
+            let entry = &*node;
+            let sa = &entry.address;
+            if sa.len >= 16 && !sa.sockaddr.is_null() {
+                let family = u16::from_le_bytes([*sa.sockaddr, *sa.sockaddr.add(1)]);
+                if family == AF_INET_SOCKADDR {
+                    let octets = [
+                        *sa.sockaddr.add(4),
+                        *sa.sockaddr.add(5),
+                        *sa.sockaddr.add(6),
+                        *sa.sockaddr.add(7),
+                    ];
+                    return format!(
+                        "{}.{}.{}.{}",
+                        octets[0], octets[1], octets[2], octets[3]
+                    );
+                }
+            }
+            node = entry.next;
+        }
+    }
+    String::new()
 }
 
 // ------------------------------------------------------- volume -> drive

@@ -8,7 +8,6 @@ import type { AppConfig, DiskInfo, DriveInfo, Snapshot } from "../shared/types";
 import { MAX_DISK_TILES, MAX_DRIVES } from "../shared/types";
 import {
   formatBytes,
-  formatBytesTotal,
   formatClock,
   formatGb,
   formatGbPair,
@@ -18,6 +17,12 @@ import {
 } from "../shared/format";
 import { Ring } from "./components/Ring";
 import { snapshotFromCache } from "./monitorCache";
+import {
+  secondLineCpu,
+  secondLineGpu,
+  secondLineMem,
+  secondLineNet,
+} from "./secondLine";
 import "./monitor.css";
 
 /**
@@ -201,6 +206,8 @@ export function MonitorPanel({ config }: { config: AppConfig }) {
   const showGpu = cfg.monitorShowGpu;
   const showNet = cfg.monitorShowNet;
   const showDisk = cfg.monitorShowDisk;
+  /** Off drops the caption row - and with it the network's "用量" label. */
+  const showL2 = cfg.monitorSecondLine;
 
   const [snap, setSnap] = useState<Snapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -322,6 +329,7 @@ export function MonitorPanel({ config }: { config: AppConfig }) {
     showGpu,
     showNet,
     showDisk,
+    showL2,
     tiles.length,
     drives.length,
   ]);
@@ -340,13 +348,6 @@ export function MonitorPanel({ config }: { config: AppConfig }) {
         (cpu.freqLiveMhz > 0
           ? ` · 实时 ${(cpu.freqLiveMhz / 1000).toFixed(2)}GHz / 额定 ${(cpu.freqMhz / 1000).toFixed(2)}GHz`
           : ` · ${(cpu.freqMhz / 1000).toFixed(2)}GHz`);
-  // The gauge already shows the average, so the line below it answers the
-  // other question: is one core pinned while the rest idle? `高/低` rather
-  // than `最高/最低` - the column is only ~80px wide.
-  const coreExtremes = cpu?.perCore.length
-    ? `高${Math.max(...cpu.perCore).toFixed(0)}% 低${Math.min(...cpu.perCore).toFixed(0)}%`
-    : "--";
-
   const mem = snap?.mem;
   // Swap no longer has a caption line of its own, so the tooltip has to carry
   // it or the figure becomes unreachable.
@@ -360,11 +361,6 @@ export function MonitorPanel({ config }: { config: AppConfig }) {
         ` · 可用 ${formatGb(mem.free)}` +
         ` · 交换 ${formatGb(mem.swapUsed, 0)} / ${formatGb(mem.swapTotal, 0)}` +
         (mem.speedMhz > 0 ? ` · ${mem.speedMhz}MHz` : "");
-  // The second memory line carries the DIMM speed on its own. It used to be
-  // `交换0/4G·2133M` squeezed in beside it, but a column is ~75 CSS px wide
-  // and both figures together never fitted; swap lives in the tooltip now.
-  const memSub = mem && mem.speedMhz > 0 ? `${mem.speedMhz}MHz` : "--";
-
   const gpu = snap?.gpu;
   const gpuTitle = !gpu
     ? "GPU（无数据）"
@@ -379,14 +375,23 @@ export function MonitorPanel({ config }: { config: AppConfig }) {
           : "");
   const gpuMem =
     gpu && gpu.memTotal > 0 ? formatGbPair(gpu.memUsed, gpu.memTotal) : "--";
-  const gpuThermal = gpu
-    ? [
-        gpu.tempC !== null && gpu.tempC > 0 ? `${gpu.tempC.toFixed(0)}℃` : null,
-        gpu.powerW !== null && gpu.powerW > 0 ? `${gpu.powerW.toFixed(0)}W` : null,
-      ]
-        .filter(Boolean)
-        .join(" · ") || "--"
-    : "--";
+
+  // The caption of each column, and - for the network - the label above it.
+  // The other three columns put a measurement on their first line and let the
+  // caption speak for itself; the network has no equivalent figure there, so
+  // its first line names what the second one says.
+  const l2Cpu = secondLineCpu(snap, pending, cfg.monitorL2Cpu);
+  const l2Mem = secondLineMem(snap, cfg.monitorL2Mem);
+  const l2Gpu = secondLineGpu(snap, pending, cfg.monitorL2Gpu);
+  const l2Net = secondLineNet(snap, pending, cfg.monitorL2Net);
+  const netLabel =
+    cfg.monitorL2Net === "ip"
+      ? "IP"
+      : cfg.monitorL2Net === "link"
+        ? "链路"
+        : cfg.monitorL2Net === "board"
+          ? "主板"
+          : "用量";
 
   // Two flags, not one: `ready` says the panel has a shape to draw - from the
   // cache or from a sample - and `pending` says the numbers in it are still
@@ -430,7 +435,7 @@ export function MonitorPanel({ config }: { config: AppConfig }) {
                   <span className="mon-col-l1">
                     {cpu ? formatClock(cpu.freqLiveMhz, cpu.freqMhz) : "--"}
                   </span>
-                  <span className="mon-col-l2">{coreExtremes}</span>
+                  {showL2 ? <span className="mon-col-l2">{l2Cpu}</span> : null}
                 </div>
 
                 <div className="mon-col">
@@ -449,7 +454,7 @@ export function MonitorPanel({ config }: { config: AppConfig }) {
                   <span className="mon-col-l1">
                     {mem ? formatGbPair(mem.used, mem.total) : "--"}
                   </span>
-                  <span className="mon-col-l2">{memSub}</span>
+                  {showL2 ? <span className="mon-col-l2">{l2Mem}</span> : null}
                 </div>
 
                 {showGpu ? (
@@ -467,7 +472,7 @@ export function MonitorPanel({ config }: { config: AppConfig }) {
                     />
                     </div>
                     <span className="mon-col-l1">{gpuMem}</span>
-                    <span className="mon-col-l2">{gpuThermal}</span>
+                    {showL2 ? <span className="mon-col-l2">{l2Gpu}</span> : null}
                   </div>
                 ) : null}
 
@@ -492,20 +497,25 @@ export function MonitorPanel({ config }: { config: AppConfig }) {
                         </span>
                       </div>
                     </div>
-                    {/* `用量` labels the pair underneath: down and up totals
-                        now share one line, which only fits as whole units. */}
-                    <span className="mon-col-l1 net-total-label">用量</span>
-                    <span
-                      className="mon-col-l2"
-                      title={
-                        `累计下行 ${formatBytes(net?.rxTotal ?? 0)}` +
-                        ` · 累计上行 ${formatBytes(net?.txTotal ?? 0)}`
-                      }
-                    >
-                      {`↓${formatBytesTotal(net?.rxTotal ?? 0)} ↑${formatBytesTotal(
-                        net?.txTotal ?? 0,
-                      )}`}
-                    </span>
+                    {/* The label names what the caption below it says - the
+                        totals, an address, the link speed - since this column
+                        has no measured figure of its own to put here. */}
+                    {showL2 ? (
+                      <>
+                        <span className="mon-col-l1 net-total-label">
+                          {netLabel}
+                        </span>
+                        <span
+                          className="mon-col-l2"
+                          title={
+                            `累计下行 ${formatBytes(net?.rxTotal ?? 0)}` +
+                            ` · 累计上行 ${formatBytes(net?.txTotal ?? 0)}`
+                          }
+                        >
+                          {l2Net}
+                        </span>
+                      </>
+                    ) : null}
                   </div>
                 ) : null}
               </>

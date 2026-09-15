@@ -10,6 +10,10 @@ import {
 import {
   ADVICE_TYPES,
   DEFAULT_CONFIG,
+  L2_CPU_OPTIONS,
+  L2_GPU_OPTIONS,
+  L2_MEM_OPTIONS,
+  L2_NET_OPTIONS,
   MAX_DRIVES,
   MAX_DISK_TILES,
   MAX_WIDGET_WIDTH,
@@ -31,6 +35,9 @@ const INTERVAL_PRESETS = [500, 1000, 2000, 5000, 10000];
 const REFRESH_PRESETS = [5, 10, 15, 30, 60, 120];
 
 type Status = { kind: "idle" | "ok" | "err"; text: string };
+
+/** One pickable caption option, as the four option lists declare them. */
+type L2Option = { readonly id: string; readonly name: string };
 
 // ------------------------------------------------------------- primitives
 
@@ -54,23 +61,73 @@ function Section({
   );
 }
 
+/**
+ * A label on the left, its control on the right.
+ *
+ * Anything explanatory goes into the `ⓘ` beside the label rather than into a
+ * line of its own: a settings window is read once to find a control and then
+ * never again, so every sentence under a row is noise that pushes the next
+ * control further down.
+ */
 function Row({
   label,
   hint,
+  value,
   children,
 }: {
   label: string;
   hint?: string;
+  /** shown next to the label in dim figures, e.g. `76%` */
+  value?: string;
   children?: ReactNode;
 }) {
   return (
     <div className="st-row">
-      <div className="st-row-label">
-        <span>{label}</span>
-        {hint ? <em>{hint}</em> : null}
-      </div>
+      <span className="st-row-label">
+        {label}
+        {value ? <b className="st-row-value">{value}</b> : null}
+        {hint ? (
+          <i className="st-info" title={hint}>
+            i
+          </i>
+        ) : null}
+      </span>
       <div className="st-row-ctl">{children}</div>
     </div>
+  );
+}
+
+/** A row whose control is a range input - the common case in 外观. */
+function SliderRow({
+  label,
+  hint,
+  value,
+  display,
+  min,
+  max,
+  step = 1,
+  onChange,
+}: {
+  label: string;
+  hint?: string;
+  value: number;
+  display: string;
+  min: number;
+  max: number;
+  step?: number;
+  onChange: (value: number) => void;
+}) {
+  return (
+    <Row label={label} hint={hint} value={display}>
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onChange={(e) => onChange(Number(e.target.value))}
+      />
+    </Row>
   );
 }
 
@@ -160,6 +217,40 @@ function ColorField({
         onChange={(e) => onChange(e.target.value)}
       />
       <span>{label}</span>
+    </div>
+  );
+}
+
+/** One column's caption picker, from one of the `L2_*_OPTIONS` lists. */
+function L2Row({
+  label,
+  value,
+  options,
+  disabled,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  options: ReadonlyArray<L2Option>;
+  disabled: boolean;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <div className="st-row">
+      <span className="st-row-label">{label}</span>
+      <div className="st-row-ctl">
+        <select
+          value={value}
+          disabled={disabled}
+          onChange={(e) => onChange(e.target.value)}
+        >
+          {options.map((o) => (
+            <option key={o.id} value={o.id}>
+              {o.name}
+            </option>
+          ))}
+        </select>
+      </div>
     </div>
   );
 }
@@ -278,7 +369,7 @@ export function SettingsPanel({ initial }: { initial: AppConfig }) {
 
   const [status, setStatus] = useState<Status>({
     kind: "idle",
-    text: "改动会自动保存并立即生效",
+    text: "改动自动保存",
   });
 
   /**
@@ -511,9 +602,7 @@ export function SettingsPanel({ initial }: { initial: AppConfig }) {
   const resetPositions = useCallback(() => {
     api
       .resetWidgetPositions()
-      .then(() =>
-        setStatus({ kind: "ok", text: "两个悬浮窗已回到默认位置" }),
-      )
+      .then(() => setStatus({ kind: "ok", text: "两个悬浮窗已回到默认位置" }))
       .catch((e: unknown) =>
         setStatus({ kind: "err", text: `重置失败：${String(e)}` }),
       );
@@ -522,120 +611,93 @@ export function SettingsPanel({ initial }: { initial: AppConfig }) {
   // -------------------------------------------------------------- render
 
   const hostIsPreset = HOST_PRESETS.some((p) => p.value === draft.qweatherHost);
+  const l2On = draft.monitorSecondLine;
 
   return (
     <div className="st">
       <header className="st-head">
-        <div>
-          <h1>
-            WSight 设置
-            <span className="st-ver" title={`WSight ${APP_VERSION_LABEL}`}>
-              {APP_VERSION_LABEL}
-            </span>
-          </h1>
-          <p>硬件监控 + 天气 · 所有改动自动保存，并立即应用到两个悬浮窗</p>
-        </div>
+        <h1>
+          WSight 设置
+          <span className="st-ver" title={`WSight ${APP_VERSION_LABEL}`}>
+            {APP_VERSION_LABEL}
+          </span>
+        </h1>
         <span className={`st-status ${status.kind}`}>{status.text}</span>
       </header>
 
       <div className="st-body">
-        <Section title="外观" desc="拖动即可实时预览">
-          <div
-            className="st-preview"
-            style={{ borderRadius: draft.radius }}
-          >
+        <Section title="外观">
+          <div className="st-preview" style={{ borderRadius: draft.radius }}>
             <MiniRing value={37} color={draft.colorCpu} label="CPU" />
             <MiniRing value={62} color={draft.colorMem} label="MEM" />
             <MiniRing value={18} color={draft.colorGpu} label="GPU" />
-            <div className="st-preview-net">
-              <span style={{ color: draft.colorNet }}>↓ 1.2 MB/s</span>
-              <span style={{ color: "#ffd479" }}>↑ 240 KB/s</span>
+            <div className="st-preview-right">
+              <div className="st-seg">
+                <button
+                  type="button"
+                  className={draft.theme === "dark" ? "on" : ""}
+                  onClick={() => update({ theme: "dark" })}
+                >
+                  深色
+                </button>
+                <button
+                  type="button"
+                  className={draft.theme === "light" ? "on" : ""}
+                  onClick={() => update({ theme: "light" })}
+                >
+                  浅色
+                </button>
+              </div>
+              <div className="st-preview-net">
+                <span style={{ color: draft.colorNet }}>↓ 1.2 MB/s</span>
+                <span style={{ color: "#ffd479" }}>↑ 240 KB/s</span>
+              </div>
             </div>
           </div>
 
-          <Row label="主题">
-            <div className="st-seg">
-              <button
-                type="button"
-                className={draft.theme === "dark" ? "on" : ""}
-                onClick={() => update({ theme: "dark" })}
-              >
-                深色
-              </button>
-              <button
-                type="button"
-                className={draft.theme === "light" ? "on" : ""}
-                onClick={() => update({ theme: "light" })}
-              >
-                浅色
-              </button>
-            </div>
-          </Row>
+          <SliderRow
+            label="不透明度"
+            hint="只作用于卡片背景：文字、圆环和图标始终全对比度，不会跟着变淡"
+            value={Math.round(draft.opacity * 100)}
+            display={`${Math.round(draft.opacity * 100)}%`}
+            min={25}
+            max={100}
+            onChange={(v) => update({ opacity: v / 100 })}
+          />
 
-          <Row label="不透明度" hint={`${Math.round(draft.opacity * 100)}% · 仅背景`}>
-            <input
-              type="range"
-              min={25}
-              max={100}
-              value={Math.round(draft.opacity * 100)}
-              onChange={(e) => update({ opacity: Number(e.target.value) / 100 })}
-            />
-          </Row>
+          <SliderRow
+            label="圆角"
+            value={Math.round(draft.radius)}
+            display={`${Math.round(draft.radius)} px`}
+            min={0}
+            max={24}
+            onChange={(v) => update({ radius: v })}
+          />
 
-          <p className="st-note">
-            不透明度只作用于卡片背景：文字、圆环和图标始终是全对比度，不会跟着变淡。
-          </p>
+          <SliderRow
+            label="监控窗宽度"
+            value={Math.round(draft.monitorWidth)}
+            display={`${Math.round(draft.monitorWidth)} px`}
+            min={MIN_WIDGET_WIDTH}
+            max={MAX_WIDGET_WIDTH}
+            step={2}
+            onChange={(v) => setWidgetWidth("monitor", v)}
+          />
 
-          <Row label="圆角" hint={`${Math.round(draft.radius)} px`}>
-            <input
-              type="range"
-              min={0}
-              max={24}
-              value={Math.round(draft.radius)}
-              onChange={(e) => update({ radius: Number(e.target.value) })}
-            />
-          </Row>
+          <SliderRow
+            label="天气窗宽度"
+            value={Math.round(draft.weatherWidth)}
+            display={`${Math.round(draft.weatherWidth)} px`}
+            min={MIN_WIDGET_WIDTH}
+            max={MAX_WIDGET_WIDTH}
+            step={2}
+            onChange={(v) => setWidgetWidth("weather", v)}
+          />
 
-          <Row label="监控窗大小" hint={`${Math.round(draft.monitorWidth)} px 宽`}>
-            <input
-              type="range"
-              min={MIN_WIDGET_WIDTH}
-              max={MAX_WIDGET_WIDTH}
-              step={2}
-              value={Math.round(draft.monitorWidth)}
-              onChange={(e) => setWidgetWidth("monitor", Number(e.target.value))}
-            />
-          </Row>
-
-          <Row label="天气窗大小" hint={`${Math.round(draft.weatherWidth)} px 宽`}>
-            <input
-              type="range"
-              min={MIN_WIDGET_WIDTH}
-              max={MAX_WIDGET_WIDTH}
-              step={2}
-              value={Math.round(draft.weatherWidth)}
-              onChange={(e) => setWidgetWidth("weather", Number(e.target.value))}
-            />
-          </Row>
-
-          <Row label="窗口位置" hint="拖到哪儿，下次就开在哪儿">
-            <button
-              type="button"
-              className="st-btn ghost small"
-              onClick={resetPositions}
-            >
-              重置到默认位置
-            </button>
-          </Row>
-
-          <p className="st-note">
-            悬浮窗默认是锁定的：既不能拖动也不能缩放，避免误碰。在悬浮窗上
-            <b>点右键</b>可以选「调整」——此时窗口边框会高亮，才能拖动和缩放；
-            同菜单里还有「置顶」和「设置」。两个窗口共用同一套 300 px 版式，
-            宽度变化时内容会等比放大，高度自动跟随，不会重排或截断。
-          </p>
-
-          <Row label="配色" hint="点击色块调整">
+          <Row
+            label="配色"
+            hint="点击色块调整；两个悬浮窗共用的环形与网速颜色"
+          >
             <div className="st-colors">
               <ColorField
                 label="CPU"
@@ -673,9 +735,19 @@ export function SettingsPanel({ initial }: { initial: AppConfig }) {
                   })
                 }
               >
-                默认配色
+                默认
               </button>
             </div>
+          </Row>
+
+          <Row label="窗口位置" hint="把悬浮窗拖到哪儿，下次就开在哪儿">
+            <button
+              type="button"
+              className="st-btn ghost small"
+              onClick={resetPositions}
+            >
+              重置到默认位置
+            </button>
           </Row>
         </Section>
 
@@ -752,6 +824,48 @@ export function SettingsPanel({ initial }: { initial: AppConfig }) {
           </Row>
         </Section>
 
+        <Section title="第二行内容" desc="圆环下方那一行，逐列定制">
+          <Row
+            label="显示第二行"
+            hint="关闭后面板变矮，网络列的用量一并取消"
+          >
+            <Toggle
+              checked={draft.monitorSecondLine}
+              onChange={(v) => update({ monitorSecondLine: v })}
+            />
+          </Row>
+          <div className={`st-l2${l2On ? "" : " off"}`}>
+            <L2Row
+              label="CPU"
+              value={draft.monitorL2Cpu}
+              options={L2_CPU_OPTIONS}
+              disabled={!l2On}
+              onChange={(v) => update({ monitorL2Cpu: v })}
+            />
+            <L2Row
+              label="内存"
+              value={draft.monitorL2Mem}
+              options={L2_MEM_OPTIONS}
+              disabled={!l2On}
+              onChange={(v) => update({ monitorL2Mem: v })}
+            />
+            <L2Row
+              label="显卡"
+              value={draft.monitorL2Gpu}
+              options={L2_GPU_OPTIONS}
+              disabled={!l2On}
+              onChange={(v) => update({ monitorL2Gpu: v })}
+            />
+            <L2Row
+              label="网络"
+              value={draft.monitorL2Net}
+              options={L2_NET_OPTIONS}
+              disabled={!l2On}
+              onChange={(v) => update({ monitorL2Net: v })}
+            />
+          </div>
+        </Section>
+
         <Section title="天气窗口" desc="和风天气 QWeather">
           <Row label="显示天气窗口">
             <Toggle
@@ -766,12 +880,12 @@ export function SettingsPanel({ initial }: { initial: AppConfig }) {
             />
           </Row>
 
-          <Row label="API Key" hint="在控制台创建的项目 Key">
+          <Row label="API Key" hint="在和风天气控制台创建的项目 Key">
             <div className="st-inline">
               <input
                 type={showKey ? "text" : "password"}
                 value={draft.qweatherKey}
-                placeholder="粘贴和风天气 API Key"
+                placeholder="粘贴 API Key"
                 spellCheck={false}
                 onChange={(e) => update({ qweatherKey: e.target.value })}
               />
@@ -817,12 +931,12 @@ export function SettingsPanel({ initial }: { initial: AppConfig }) {
             </Row>
           ) : null}
 
-          <Row label="城市" hint={draft.locationName || "未选择"}>
+          <Row label="城市" value={draft.locationName || "未选择"}>
             <div className="st-inline">
               <input
                 type="text"
                 value={keyword}
-                placeholder="输入城市名后回车，例如 杭州"
+                placeholder="输入城市名后回车"
                 onChange={(e) => setKeyword(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === "Enter") void searchCity();
@@ -881,10 +995,7 @@ export function SettingsPanel({ initial }: { initial: AppConfig }) {
             </select>
           </Row>
 
-          <Row
-            label="预报天数"
-            hint={`未来 ${draft.weatherDays} 天，多出来的横向滚动`}
-          >
+          <Row label="预报天数" hint="多出来的日子横向滚动查看">
             <select
               value={draft.weatherDays}
               onChange={(e) => update({ weatherDays: Number(e.target.value) })}
@@ -897,10 +1008,7 @@ export function SettingsPanel({ initial }: { initial: AppConfig }) {
             </select>
           </Row>
 
-          <Row
-            label="预报显示格数"
-            hint={`一行 ${draft.weatherForecastCols} 格，多出来的横向滚动`}
-          >
+          <Row label="预报显示格数" hint="一行放几格，多出来的横向滚动">
             <select
               value={draft.weatherForecastCols}
               onChange={(e) =>
@@ -915,13 +1023,7 @@ export function SettingsPanel({ initial }: { initial: AppConfig }) {
             </select>
           </Row>
 
-          <Row
-            label="生活指数"
-            hint={`温度下方那句话 · ${
-              ADVICE_TYPES.find((t) => t.id === draft.weatherAdviceType)?.name ??
-              "舒适度指数"
-            }`}
-          >
+          <Row label="生活指数" hint="温度下方那句建议的类别">
             <select
               value={draft.weatherAdviceType}
               onChange={(e) =>
@@ -937,11 +1039,8 @@ export function SettingsPanel({ initial }: { initial: AppConfig }) {
           </Row>
         </Section>
 
-        <Section title="通用" desc="开机与窗口行为">
-          <Row
-            label="开机启动"
-            hint="登录 Windows 后自动打开两个悬浮窗"
-          >
+        <Section title="通用">
+          <Row label="开机启动" hint="登录 Windows 后自动打开两个悬浮窗">
             <Toggle
               checked={draft.autostart}
               onChange={(v) => update({ autostart: v })}
@@ -957,9 +1056,7 @@ export function SettingsPanel({ initial }: { initial: AppConfig }) {
       </div>
 
       <div className="st-about">
-        <span className="st-about-line">
-          WSight {APP_VERSION_LABEL} · MIT 开源
-        </span>
+        <span className="st-about-line">WSight {APP_VERSION_LABEL} · MIT</span>
         <div className="st-links">
           <button type="button" className="st-link" onClick={() => open(REPO_URL)}>
             开源主页
@@ -971,11 +1068,7 @@ export function SettingsPanel({ initial }: { initial: AppConfig }) {
           >
             更新日志
           </button>
-          <button
-            type="button"
-            className="st-link"
-            onClick={() => open(ISSUES_URL)}
-          >
+          <button type="button" className="st-link" onClick={() => open(ISSUES_URL)}>
             反馈问题
           </button>
         </div>
@@ -999,7 +1092,7 @@ export function SettingsPanel({ initial }: { initial: AppConfig }) {
           disabled={refreshing}
           onClick={() => void refreshNow()}
         >
-          {refreshing ? "刷新中…" : "立即刷新天气"}
+          {refreshing ? "刷新中…" : "刷新天气"}
         </button>
         <button
           type="button"
