@@ -266,3 +266,87 @@
   line-height: 1.5;
   text-align: center;
 }
+
+/* ---------------------------------------------------------------- skeleton
+   Shown for the beat between the window appearing and the first sample
+   arriving. Two independent groups - the gauge row and the disk block - each
+   mirroring the box it stands in, so nothing shifts when real numbers land:
+   the ring placeholder is exactly `.mon-col-slot` tall, the disk block keeps
+   its fixed 64px, and both use the same column count as the finished panel. */
+@keyframes mon-pulse {
+  0%,
+  100% {
+    opacity: 0.25;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+.mon-sk-line,
+.mon-sk-ring {
+  display: block;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.08);
+  animation: mon-pulse 1.4s ease-in-out infinite;
+}
+
+/* Heading chip: narrower than a caption line, and centred like the text it
+   replaces.    The heights below are the line boxes they stand in for, and they get there
+   the honest way: same font size as the real caption, same normal line height,
+   one non-breaking space inside. Guessing a pixel height instead left the
+   panel 6px short and the window jumped when the data arrived. */
+.mon-sk-head {
+  width: 26px;
+  font-size: 12.5px;
+}
+
+/* Same 50px as `.mon-col-slot`, so the two caption lines below a skeleton
+   column land on the real baseline. */
+.mon-sk-ring {
+  width: 46px;
+  height: 46px;
+  border-radius: 50%;
+}
+
+.mon-sk-l1 {
+  width: 42px;
+  font-size: 11px;
+}
+
+.mon-sk-l2 {
+  width: 32px;
+  font-size: 10px;
+}
+
+/* Disk tile: caption, the fill bar (same 6px track as `.disk-bar`), then the
+   used/total line. */
+.mon-sk-disk-name {
+  width: 40px;
+  font-size: 11.5px;
+}
+
+.mon-sk-disk-usage {
+  width: 46px;
+  font-size: 10px;
+}
+
+.mon-sk-disk-bar {
+  display: block;
+  width: 100%;
+  max-width: 58px;
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.08);
+  animation: mon-pulse 1.4s ease-in-out infinite;
+}
+
+.mon-sk-io-title {
+  width: 52px;
+  font-size: 9px;
+}
+
+.mon-sk-io-line {
+  width: 66px;
+  font-size: 9.5px;
+}

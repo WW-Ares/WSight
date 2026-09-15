@@ -29,7 +29,10 @@ pub fn enable() -> Result<(), String> {
         .map_err(|e| format!("打开注册表 Run 项失败: {e}"))?;
     let exe = current_exe_string()?;
     // Quoted so a path with spaces is treated as the exe, not "exe + args".
-    let value = format!("\"{exe}\"");
+    // `--startup` lets the new process know it was launched at logon: it then
+    // waits a few seconds before creating any window, instead of racing every
+    // other start-up entry for the disk and the WebView2 runtime.
+    let value = format!("\"{exe}\" --startup");
     run.set_value(VALUE_NAME, &value)
         .map_err(|e| format!("写入开机启动项失败: {e}"))?;
     eprintln!("[autostart] enabled -> {value}");

@@ -140,6 +140,56 @@ function DriveIo({ drives }: { drives: DriveInfo[] }) {
   );
 }
 
+/* -------------------------------------------------------------- skeletons
+   Nothing is cached here: the panel simply owns its final shape during the
+   beat between the window appearing and the collector's first sample. The two
+   groups are independent - the gauge row and the disk block each mirror the
+   box they stand in, and both read the same switches as the real thing, so the
+   number of placeholders matches what is about to arrive. */
+
+/**
+ * One gauge column: heading chip, empty ring, two caption lines.
+ *
+ * Each caption holds a non-breaking space rather than a fixed pixel height, so
+ * it occupies exactly the line box the real text will - see the note in
+ * `monitor.css`.
+ */
+function GaugeSkeleton() {
+  return (
+    <div className="mon-col">
+      <span className="mon-sk-line mon-sk-head">&nbsp;</span>
+      <div className="mon-col-slot">
+        <span className="mon-sk-ring" />
+      </div>
+      <span className="mon-sk-line mon-sk-l1">&nbsp;</span>
+      <span className="mon-sk-line mon-sk-l2">&nbsp;</span>
+    </div>
+  );
+}
+
+/** One volume tile: caption, the fill track, then the used/total line. */
+function DiskTileSkeleton() {
+  return (
+    <div className="disk-tile">
+      <span className="mon-sk-line mon-sk-disk-name">&nbsp;</span>
+      <span className="mon-sk-disk-bar" />
+      <span className="mon-sk-line mon-sk-disk-usage">&nbsp;</span>
+    </div>
+  );
+}
+
+/** The throughput column - a single drive, which is the common case. */
+function DriveIoSkeleton() {
+  return (
+    <div className="disk-io">
+      <div className="disk-io-item">
+        <span className="mon-sk-line mon-sk-io-title">&nbsp;</span>
+        <span className="mon-sk-line mon-sk-io-line">&nbsp;</span>
+      </div>
+    </div>
+  );
+}
+
 export function MonitorPanel({ config }: { config: AppConfig }) {
   const cfg = useLiveConfig(config);
   const showGpu = cfg.monitorShowGpu;
@@ -295,13 +345,19 @@ export function MonitorPanel({ config }: { config: AppConfig }) {
         .join(" · ") || "--"
     : "--";
 
+  // Before the first sample the two groups below draw their own placeholders;
+  // once it arrives they swap to the real thing without the panel resizing.
+  const ready = snap !== null;
+  const showDiskBlock =
+    showDisk && (!ready || tiles.length > 0 || drives.length > 0);
+
   return (
     <WidgetFrame
       label="monitor"
       variant="monitor"
       stageRef={stageRef}
       title="WSight"
-      sub={snap ? formatUptime(snap.uptimeSec) : "…"}
+      sub={ready ? formatUptime(snap.uptimeSec) : "启动中…"}
       onTop={cfg.monitorAlwaysOnTop}
     >
       {error && !snap ? (
@@ -312,116 +368,135 @@ export function MonitorPanel({ config }: { config: AppConfig }) {
             className="mon-grid"
             style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))` }}
           >
-            <div className="mon-col">
-              <span className="mon-col-head" style={{ color: "var(--accent-cpu)" }}>
-                CPU
-              </span>
-              <div className="mon-col-slot">
-                <Ring
-                  value={cpu?.load ?? 0}
-                  color="var(--accent-cpu)"
-                  ramp={ringRamp}
-                  title={cpuTitle}
-                />
-              </div>
-              <span className="mon-col-l1">
-                {cpu ? formatClock(cpu.freqLiveMhz, cpu.freqMhz) : "--"}
-              </span>
-              <span className="mon-col-l2">{coreExtremes}</span>
-            </div>
-
-            <div className="mon-col">
-              <span className="mon-col-head" style={{ color: "var(--accent-mem)" }}>
-                Mem
-              </span>
-              <div className="mon-col-slot">
-                <Ring
-                  value={mem?.percent ?? 0}
-                  color="var(--accent-mem)"
-                  ramp={ringRamp}
-                  title={memTitle}
-                />
-              </div>
-              <span className="mon-col-l1">
-                {mem ? formatGbPair(mem.used, mem.total) : "--"}
-              </span>
-              <span className="mon-col-l2">{memSub}</span>
-            </div>
-
-            {showGpu ? (
-              <div className="mon-col">
-                <span className="mon-col-head" style={{ color: "var(--accent-gpu)" }}>
-                  GPU
-                </span>
-                <div className="mon-col-slot">
-                  <Ring
-                    value={gpu?.load ?? 0}
-                    color="var(--accent-gpu)"
-                    ramp={ringRamp}
-                    title={gpuTitle}
-                  />
+            {ready ? (
+              <>
+                <div className="mon-col">
+                  <span className="mon-col-head" style={{ color: "var(--accent-cpu)" }}>
+                    CPU
+                  </span>
+                  <div className="mon-col-slot">
+                    <Ring
+                      value={cpu?.load ?? 0}
+                      color="var(--accent-cpu)"
+                      ramp={ringRamp}
+                      title={cpuTitle}
+                    />
+                  </div>
+                  <span className="mon-col-l1">
+                    {cpu ? formatClock(cpu.freqLiveMhz, cpu.freqMhz) : "--"}
+                  </span>
+                  <span className="mon-col-l2">{coreExtremes}</span>
                 </div>
-                <span className="mon-col-l1">{gpuMem}</span>
-                <span className="mon-col-l2">{gpuThermal}</span>
-              </div>
-            ) : null}
 
-            {showNet ? (
-              <div className="mon-col">
-                {/* The adapter that carries the traffic names the column, so
-                    the heading says which link these numbers belong to. */}
-                <span className="mon-col-head">
-                  {net?.name ?? "--"}
-                </span>
-                <div className="mon-col-slot">
-                  <div className="net-pair">
-                    <span className="net-line">
-                      <i className="net-arrow down">↓</i>
-                      <b style={{ color: rateColor(net?.rxSec ?? 0, cfg.colorNet) }}>
-                        {formatRateCompact(net?.rxSec ?? 0)}
-                      </b>
+                <div className="mon-col">
+                  <span className="mon-col-head" style={{ color: "var(--accent-mem)" }}>
+                    Mem
+                  </span>
+                  <div className="mon-col-slot">
+                    <Ring
+                      value={mem?.percent ?? 0}
+                      color="var(--accent-mem)"
+                      ramp={ringRamp}
+                      title={memTitle}
+                    />
+                  </div>
+                  <span className="mon-col-l1">
+                    {mem ? formatGbPair(mem.used, mem.total) : "--"}
+                  </span>
+                  <span className="mon-col-l2">{memSub}</span>
+                </div>
+
+                {showGpu ? (
+                  <div className="mon-col">
+                    <span className="mon-col-head" style={{ color: "var(--accent-gpu)" }}>
+                      GPU
                     </span>
-                    <span className="net-line">
-                      <i className="net-arrow up">↑</i>
-                      <b style={{ color: rateColor(net?.txSec ?? 0, "#ffd479") }}>
-                        {formatRateCompact(net?.txSec ?? 0)}
-                      </b>
+                    <div className="mon-col-slot">
+                      <Ring
+                        value={gpu?.load ?? 0}
+                        color="var(--accent-gpu)"
+                        ramp={ringRamp}
+                        title={gpuTitle}
+                      />
+                    </div>
+                    <span className="mon-col-l1">{gpuMem}</span>
+                    <span className="mon-col-l2">{gpuThermal}</span>
+                  </div>
+                ) : null}
+
+                {showNet ? (
+                  <div className="mon-col">
+                    {/* The adapter that carries the traffic names the column,
+                        so the heading says which link these numbers belong to. */}
+                    <span className="mon-col-head">{net?.name ?? "--"}</span>
+                    <div className="mon-col-slot">
+                      <div className="net-pair">
+                        <span className="net-line">
+                          <i className="net-arrow down">↓</i>
+                          <b style={{ color: rateColor(net?.rxSec ?? 0, cfg.colorNet) }}>
+                            {formatRateCompact(net?.rxSec ?? 0)}
+                          </b>
+                        </span>
+                        <span className="net-line">
+                          <i className="net-arrow up">↑</i>
+                          <b style={{ color: rateColor(net?.txSec ?? 0, "#ffd479") }}>
+                            {formatRateCompact(net?.txSec ?? 0)}
+                          </b>
+                        </span>
+                      </div>
+                    </div>
+                    {/* `用量` labels the pair underneath: down and up totals
+                        now share one line, which only fits as whole units. */}
+                    <span className="mon-col-l1 net-total-label">用量</span>
+                    <span
+                      className="mon-col-l2"
+                      title={
+                        `累计下行 ${formatBytes(net?.rxTotal ?? 0)}` +
+                        ` · 累计上行 ${formatBytes(net?.txTotal ?? 0)}`
+                      }
+                    >
+                      {`↓${formatBytesTotal(net?.rxTotal ?? 0)} ↑${formatBytesTotal(
+                        net?.txTotal ?? 0,
+                      )}`}
                     </span>
                   </div>
-                </div>
-                {/* `用量` labels the pair underneath: down and up totals now
-                    share one line, which only fits as whole units. */}
-                <span className="mon-col-l1 net-total-label">用量</span>
-                <span
-                  className="mon-col-l2"
-                  title={
-                    `累计下行 ${formatBytes(net?.rxTotal ?? 0)}` +
-                    ` · 累计上行 ${formatBytes(net?.txTotal ?? 0)}`
-                  }
-                >
-                  {`↓${formatBytesTotal(net?.rxTotal ?? 0)} ↑${formatBytesTotal(
-                    net?.txTotal ?? 0,
-                  )}`}
-                </span>
-              </div>
-            ) : null}
+                ) : null}
+              </>
+            ) : (
+              // One placeholder per column, so switching GPU or the network
+              // gauge off narrows the skeleton the same way it narrows the row.
+              Array.from({ length: cols }, (_, i) => <GaugeSkeleton key={i} />)
+            )}
           </div>
 
-          {showDisk && (tiles.length || drives.length) ? (
+          {showDiskBlock ? (
             <>
               <div className="mon-divider" />
               <div
                 className="mon-grid mon-disk-block"
                 style={{ gridTemplateColumns: diskCols }}
               >
-                {tiles.map((disk) => (
-                  <DiskTile key={disk.letter} disk={disk} />
-                ))}
-                {/* The throughput block owns the right-most column - directly
-                    under the network gauge. */}
-                <div className="disk-io-cell">
-                  <DriveIo drives={drives} />
-                </div>
+                {ready ? (
+                  <>
+                    {tiles.map((disk) => (
+                      <DiskTile key={disk.letter} disk={disk} />
+                    ))}
+                    {/* The throughput block owns the right-most column -
+                        directly under the network gauge. */}
+                    <div className="disk-io-cell">
+                      <DriveIo drives={drives} />
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    {Array.from({ length: tileSlots }, (_, i) => (
+                      <DiskTileSkeleton key={i} />
+                    ))}
+                    <div className="disk-io-cell">
+                      <DriveIoSkeleton />
+                    </div>
+                  </>
+                )}
               </div>
             </>
           ) : null}

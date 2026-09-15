@@ -1,7 +1,9 @@
 mod autostart;
 mod collector;
 mod config;
+mod launchlog;
 mod native;
+mod single_instance;
 mod weather;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -24,6 +26,21 @@ pub const CONFIG_EVENT: &str = "config://changed";
 pub struct AppState {
     pub config: Mutex<AppConfig>,
     pub snapshot: Mutex<Option<Snapshot>>,
+}
+
+/// Append one line to `%APPDATA%\WSight\launch.log`.
+///
+/// Called from `main` before Tauri exists, because the facts worth recording
+/// (is this the auto-start launch, is another copy already running) are all
+/// decided before - or instead of - the app booting.
+pub fn log_launch(line: &str) {
+    launchlog::log(line);
+}
+
+/// False when another WSight is already running; `main` then exits quietly
+/// instead of opening a second, dead window.
+pub fn claim_instance() -> bool {
+    single_instance::claim()
 }
 
 // ---------------------------------------------------------------- helpers
@@ -991,10 +1008,29 @@ pub fn run() {
                 eprintln!("[autostart] {e}");
             }
 
-            // First run: no city configured yet -> open the settings window so
-            // the user can finish the setup instead of staring at an empty
-            // weather widget and wondering why nothing shows up.
-            if cfg.location_id.is_empty() {
+            // First run: there is no config file at all, so no city to show and
+            // no key to call with - open the settings window instead of
+            // leaving the user staring at an empty widget.
+            //
+            // Keyed on the *file*, not on `location_id`. A config that exists
+            // but has no city is a state the user chose (or is in the middle of
+            // choosing inside the settings window); re-opening the window on
+            // every start - including the auto-start one - is how it ends up
+            // parked on the taskbar with nothing to do.
+            let city = if cfg.location_id.is_empty() {
+                "none".to_string()
+            } else {
+                cfg.location_id.clone()
+            };
+            launchlog::log(&format!(
+                "boot pid={} config={} city={} autostart={}",
+                std::process::id(),
+                config::config_path().display(),
+                city,
+                cfg.autostart
+            ));
+            if !config::config_path().exists() {
+                launchlog::log("first run: no config file - opening settings");
                 let _ = show_settings(&handle);
             }
 
