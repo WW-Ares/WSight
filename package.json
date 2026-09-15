@@ -1,13 +1,15 @@
 {
   "name": "wsight",
   "private": true,
-  "version": "0.4.1",
+  "version": "0.4.2",
   "type": "module",
   "description": "WSight - lightweight desktop widgets: hardware monitor panel + QWeather panel",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "check:version": "node scripts/check-version.mjs",
+    "release:notes": "node scripts/release-notes.mjs",
+    "release:check": "node scripts/post-release-check.mjs",
     "preview": "vite preview",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",

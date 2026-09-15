@@ -1,0 +1,209 @@
+#!/usr/bin/env node
+/**
+ * 发版后自检：确认这次发布"真的落地了"，而不是只看每条命令有没有报错。
+ *
+ *   node scripts/post-release-check.mjs          # 检查 package.json 的 version
+ *   node scripts/post-release-check.mjs 0.4.0
+ *
+ * 查六件事：
+ *   1. 工作区干净（发版完不该还有没提交的改动）
+ *   2. 本地 HEAD 与远端 main 一致（推上去了、也没落后）
+ *   3. 远端最后一条提交说明只有那两个词之一
+ *   4. 标签 v<版本> 存在，且指向 HEAD
+ *   5. Release 存在，附件里有 WSight.exe（少截图只警告）
+ *   6. Release 说明非空，且是从 CHANGELOG.md 派生出来的
+ *
+ * 有 ❌ 退出码 1 —— 可以直接接在发布流程末尾当守门员。
+ */
+import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+import { changelogSection, firstContentLine } from "./lib/changelog-section.mjs";
+
+const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+const ALLOWED_MESSAGES = new Set(["Initial commit", "Update"]);
+const REQUIRED_ASSET = "WSight.exe";
+const OPTIONAL_ASSETS = ["screenshot-weather.png", "screenshot-monitor.png"];
+
+const version =
+  process.argv[2] ?? JSON.parse(readFileSync(join(root, "package.json"), "utf8")).version;
+
+/** @type {{level:"ok"|"warn"|"fail", label:string, detail:string}[]} */
+const checks = [];
+const add = (level, label, detail = "") => checks.push({ level, label, detail });
+
+function tryRun(cmd, args) {
+  try {
+    const out = execFileSync(cmd, args, {
+      cwd: root,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      maxBuffer: 16 * 1024 * 1024,
+    });
+    return { ok: true, out: out.trim(), err: "" };
+  } catch (error) {
+    const err = `${error.stderr ?? ""}${error.message ?? ""}`.trim();
+    return { ok: false, out: `${error.stdout ?? ""}`.trim(), err };
+  }
+}
+
+function findGh() {
+  const candidates = [
+    process.env.GH_PATH,
+    "gh",
+    "C:/Program Files/GitHub CLI/gh.exe",
+    "C:\\Program Files\\GitHub CLI\\gh.exe",
+  ].filter(Boolean);
+  for (const candidate of candidates) {
+    if (tryRun(candidate, ["--version"]).ok) return candidate;
+  }
+  return null;
+}
+
+/** gh api；404 返回 null，其它错误直接抛出给人看 */
+function ghApi(path) {
+  const res = tryRun(gh, ["api", path]);
+  if (res.ok) return JSON.parse(res.out);
+  if (/Not Found|HTTP 404/i.test(res.err)) return null;
+  throw new Error(`gh api ${path} 失败：${res.err.split("\n")[0]}`);
+}
+
+const gh = findGh();
+const short = (sha) => (sha ? sha.slice(0, 7) : "(未知)");
+
+console.log(`WSight v${version} 发版自检\n`);
+
+// --- 1. 工作区 ---------------------------------------------------------------
+const status = tryRun("git", ["status", "--porcelain"]);
+if (!status.ok) {
+  add("fail", "工作区状态", `git status 失败：${status.err.split("\n")[0]}`);
+} else if (status.out) {
+  const files = status.out.split("\n");
+  add(
+    "fail",
+    "工作区干净",
+    `还有 ${files.length} 项未提交：${files.slice(0, 3).join(" / ")}${files.length > 3 ? " …" : ""}`,
+  );
+} else {
+  add("ok", "工作区干净");
+}
+
+// --- 2~6. 远端侧 -------------------------------------------------------------
+const headSha = tryRun("git", ["rev-parse", "HEAD"]).out;
+
+if (!gh) {
+  add("warn", "远端状态", "找不到 gh 命令，设置 GH_PATH 或安装 GitHub CLI 后重跑");
+} else {
+  const remote = tryRun("git", ["remote", "get-url", "origin"]);
+  const match = remote.ok ? remote.out.match(/github\.com[:/]([^/]+)\/(.+?)(?:\.git)?$/) : null;
+
+  if (!match) {
+    add("fail", "远端仓库", `从 origin 解析不出 GitHub 仓库：${remote.out || remote.err}`);
+  } else {
+    const repo = `${match[1]}/${match[2]}`;
+
+    // 2. 本地 vs 远端 main
+    const commit = ghApi(`repos/${repo}/commits/main`);
+    const remoteSha = commit?.sha ?? "";
+    if (!commit) {
+      add("fail", "远端 main", `gh api repos/${repo}/commits/main 返回 404`);
+    } else if (headSha && remoteSha === headSha) {
+      add("ok", "本地与远端 main 一致", short(headSha));
+    } else {
+      add("fail", "本地与远端 main 一致", `本地 ${short(headSha)} ≠ 远端 ${short(remoteSha)}`);
+    }
+
+    // 3. 远端最后一条提交说明
+    const message = (commit?.commit?.message ?? "").split(/\r?\n/)[0].trim();
+    if (!commit) {
+      // 上一条已经报过了，不重复
+    } else if (ALLOWED_MESSAGES.has(message)) {
+      add("ok", "远端最后一条提交说明合规", `"${message}"`);
+    } else {
+      add(
+        "fail",
+        "远端最后一条提交说明合规",
+        `是 "${message}"，只允许 Initial commit / Update`,
+      );
+    }
+
+    // 4. 标签指向 HEAD
+    const tagRef = ghApi(`repos/${repo}/git/ref/tags/v${version}`);
+    if (!tagRef) {
+      add("fail", `标签 v${version} 存在`, "远端没有这个标签 —— 还没打标签或没推上去");
+    } else {
+      let target = tagRef.object?.sha ?? "";
+      if (tagRef.object?.type === "tag") {
+        target = ghApi(`repos/${repo}/git/tags/${target}`)?.object?.sha ?? "";
+      }
+      if (target && headSha && target === headSha) {
+        add("ok", `标签 v${version} 指向 HEAD`, short(target));
+      } else {
+        add(
+          "fail",
+          `标签 v${version} 指向 HEAD`,
+          `标签指向 ${short(target)}，HEAD 是 ${short(headSha)}`,
+        );
+      }
+    }
+
+    // 5~6. Release、附件、说明
+    const release = ghApi(`repos/${repo}/releases/tags/v${version}`);
+    if (!release) {
+      add("fail", `Release v${version} 存在`, "远端没有对应 Release —— 还没发，或发失败了");
+    } else {
+      const names = (release.assets ?? []).map((asset) => asset.name);
+      if (names.includes(REQUIRED_ASSET)) {
+        add("ok", "Release 附件含安装产物", names.join(" / "));
+      } else {
+        add(
+          "fail",
+          "Release 附件含安装产物",
+          `缺少 ${REQUIRED_ASSET}，现有：${names.join(" / ") || "(空)"}`,
+        );
+      }
+      const missing = OPTIONAL_ASSETS.filter((name) => !names.includes(name));
+      if (missing.length) {
+        add("warn", "Release 附件含截图", `缺少 ${missing.join(" / ")}`);
+      }
+
+      const body = (release.body ?? "").trim();
+      if (!body) {
+        add("warn", "Release 说明非空", "说明是空的，别让发布页只剩一个标题");
+      } else {
+        const section = changelogSection(
+          readFileSync(join(root, "CHANGELOG.md"), "utf8"),
+          version,
+        );
+        const probe = section ? firstContentLine(section) : null;
+        if (!section) {
+          add("warn", "Release 说明与 CHANGELOG 一致", `CHANGELOG.md 里没有 ${version} 的段落`);
+        } else if (probe && body.includes(probe)) {
+          add("ok", "Release 说明与 CHANGELOG 一致", "说明来自 CHANGELOG 该版本段落");
+        } else {
+          add("warn", "Release 说明与 CHANGELOG 一致", "说明不像从 CHANGELOG 抽的，两处可能各写了一份");
+        }
+      }
+    }
+  }
+}
+
+// --- 输出 --------------------------------------------------------------------
+const ICON = { ok: "✅", warn: "⚠️ ", fail: "❌" };
+for (const check of checks) {
+  console.log(`  ${ICON[check.level]} ${check.label}${check.detail ? `  —— ${check.detail}` : ""}`);
+}
+
+const failed = checks.filter((c) => c.level === "fail").length;
+const warned = checks.filter((c) => c.level === "warn").length;
+const passed = checks.length - failed - warned;
+console.log("");
+console.log(
+  failed
+    ? `结论：${passed} 项通过，${failed} 项失败${warned ? `，${warned} 项警告` : ""}`
+    : `结论：全部通过${warned ? `（${warned} 项警告）` : ""}`,
+);
+
+process.exit(failed ? 1 : 0);
