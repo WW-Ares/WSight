@@ -11,7 +11,8 @@
  *   3. 远端最后一条提交说明只有那两个词之一
  *   4. 标签 v<版本> 存在，且指向 HEAD
  *   5. Release 存在，附件里有 WSight.exe（少截图只警告）
- *   6. Release 说明非空，且是从 CHANGELOG.md 派生出来的
+ *   6. Release 说明覆盖了"上一个已发布标签 → 本次版本"区间里的**每一个** CHANGELOG
+ *      段落 —— 只提交、没发过 Release 的中间版本，必须跟着本次一起露脸
  *
  * 有 ❌ 退出码 1 —— 可以直接接在发布流程末尾当守门员。
  */
@@ -20,7 +21,8 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { changelogSection, firstContentLine } from "./lib/changelog-section.mjs";
+import { changelogSectionsSince, firstContentLine } from "./lib/changelog-section.mjs";
+import { previousReleaseTag } from "./lib/release-range.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const ALLOWED_MESSAGES = new Set(["Initial commit", "Update"]);
@@ -173,17 +175,45 @@ if (!gh) {
       if (!body) {
         add("warn", "Release 说明非空", "说明是空的，别让发布页只剩一个标题");
       } else {
-        const section = changelogSection(
+        // 说明该覆盖的区间：上一个已发布标签 → 本次版本。中间没发过版的版本
+        // （本地攒着的）必须一起出现，否则用户看到的说明缺了他没见过的功能。
+        const fromTag = previousReleaseTag(version, root);
+        const fromVersion = fromTag ? fromTag.replace(/^v/, "") : null;
+        const sections = changelogSectionsSince(
           readFileSync(join(root, "CHANGELOG.md"), "utf8"),
           version,
+          fromVersion,
         );
-        const probe = section ? firstContentLine(section) : null;
-        if (!section) {
-          add("warn", "Release 说明与 CHANGELOG 一致", `CHANGELOG.md 里没有 ${version} 的段落`);
-        } else if (probe && body.includes(probe)) {
-          add("ok", "Release 说明与 CHANGELOG 一致", "说明来自 CHANGELOG 该版本段落");
+
+        if (!sections) {
+          add(
+            "warn",
+            "Release 说明覆盖全部改动",
+            `CHANGELOG.md 里划不出区间（起点 ${fromTag ?? "无"}）`,
+          );
         } else {
-          add("warn", "Release 说明与 CHANGELOG 一致", "说明不像从 CHANGELOG 抽的，两处可能各写了一份");
+          const missing = sections
+            .filter((item) => {
+              const probe = firstContentLine(item.section);
+              return probe && !body.includes(probe);
+            })
+            .map((item) => `v${item.version}`);
+          const range = fromVersion ? `${fromTag} 之后 → v${version}` : `v${version}`;
+
+          if (missing.length) {
+            add(
+              "fail",
+              "Release 说明覆盖全部改动",
+              `区间（${range}）里 ${missing.join(" / ")} 的内容没出现在说明里` +
+                ` —— 漏带了只提交、没发过 Release 的版本`,
+            );
+          } else {
+            add(
+              "ok",
+              "Release 说明覆盖全部改动",
+              `${range}，共 ${sections.length} 个版本，与 CHANGELOG 同源`,
+            );
+          }
         }
       }
     }
