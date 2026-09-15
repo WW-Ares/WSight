@@ -1,20 +1,28 @@
 #!/usr/bin/env node
 /**
- * 从 CHANGELOG.md 抽出"本次发布要交代"的段落，写成文件交给 `gh release create --notes-file`。
+ * 从 CHANGELOG.md 抽出"本次发布要交代"的内容，写成文件交给 `gh release create --notes-file`。
  *
  *   node scripts/release-notes.mjs             # 版本号默认取 package.json
- *   node scripts/release-notes.mjs 0.4.1
- *   node scripts/release-notes.mjs 0.4.1 --since v0.3.0   # 手动指定上次发布的标签
- *   node scripts/release-notes.mjs 0.4.1 --since none     # 只发这一个版本
- *   node scripts/release-notes.mjs 0.4.1 --out /tmp/notes.md
+ *   node scripts/release-notes.mjs 0.4.5
+ *   node scripts/release-notes.mjs 0.4.5 --since v0.4.2   # 手动指定上次发布的标签
+ *   node scripts/release-notes.mjs 0.4.5 --since none     # 只发这一个版本
+ *   node scripts/release-notes.mjs 0.4.5 --out /tmp/notes.md
  *
  * 为什么要它：发布说明只该有一个源头。CHANGELOG.md 是源头，Release 页面的说明由它
  * 派生；否则"仓库里的记录"和"发布页上的说明"会各写一份，慢慢就对不上了。
  *
  * **区间口径**：从上一个已打标签的版本（= 上次发出去的版本）到本次版本，中间所有
- * 段落合并成一份说明 —— 只提交、没发过 Release 的中间版本必须跟着一起露脸，
- * 否则用户装上新版，看到的说明里缺了一整批他从未见过的功能。标签由
- * `lib/release-range.mjs` 探测，`--since` 可以覆盖它。
+ * 版本都要算进来 —— 只提交、没发过 Release 的中间版本必须跟着一起露脸，否则用户装上
+ * 新版，看到的说明里缺了一整批他从未见过的功能。标签由 `lib/release-range.mjs` 探测，
+ * `--since` 可以覆盖它。
+ *
+ * **归并口径**：读者要的是"从上次发版到现在一共变成了什么样"，不是"每个版本号底下各
+ * 干了什么"。所以输出**不带版本标题**，区间内所有条目按 新增 / 改进 / 修复 三类并到
+ * 一起；每条前面留一行 `<!-- vX.Y.Z -->` 注释标明出处（渲染时不显示）。
+ *
+ * 需要人再走一步：同一件事在多个版本里被反复改动的（v0.4.4 加上磁吸、v0.4.5 又修好），
+ * 措辞层面要合并成一句"新增磁吸"。脚本只把材料摆整齐 —— 它会往 stderr 打出疑似同主题
+ * 的条目对你，照着一改即可。
  *
  * 抽不出段落就退出码 1 —— 版本没写进 CHANGELOG 就发版，就是要在这里被拦住。
  */
@@ -22,7 +30,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { changelogSectionsSince, joinSections } from "./lib/changelog-section.mjs";
+import { changelogSectionsSince, likelyDuplicates, mergeSections } from "./lib/changelog-section.mjs";
 import { previousReleaseTag } from "./lib/release-range.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -99,14 +107,16 @@ if (!sections) {
   process.exit(1);
 }
 
-// 多版本合并时，在顶上写一行"这次到底带了什么" —— 否则读者看到标题是
-// v0.4.5、底下却跟着 v0.4.4 / v0.4.3 两段，会以为放错了。
+// 归并成一份说明：不带版本标题，所有条目按 新增 / 改进 / 修复 并到一起。
+// 多版本时顶上写一行"这次到底带了什么"，否则读者会以为漏了什么。
+const versions = sections.map((item) => item.version);
 const header =
   sections.length > 1 && fromTag
-    ? `本版包含 \`${fromTag}\`（上次发布）之后的全部改动，共 ${sections.length} 个版本：` +
-      `${sections.map((item) => `**v${item.version}**`).join(" → ")}。\n\n---\n\n`
-    : "";
-const notes = header + joinSections(sections);
+    ? `本版包含 \`${fromTag}\`（上次发布）之后的全部改动：` +
+      `${versions.map((item) => `**v${item}**`).join(" → ")}（共 ${sections.length} 个版本）。` +
+      `以下按内容归类，同一处功能的多轮改动已合并。\n\n---\n\n`
+    : `本次发布 **v${version}**，更新内容如下。\n\n---\n\n`;
+const notes = header + mergeSections(sections);
 const target = out.startsWith("/") || /^[A-Za-z]:[\\/]/.test(out) ? out : join(root, out);
 mkdirSync(dirname(target), { recursive: true });
 writeFileSync(target, notes, "utf8");
@@ -115,13 +125,28 @@ writeFileSync(target, notes, "utf8");
 console.log(`已写入 ${target}`);
 if (fromVersion) {
   console.log(`发布区间：${fromTag} 之后 → v${version}`);
-  console.log(`覆盖 ${sections.length} 个版本：${sections.map((item) => `v${item.version}`).join(" → ")}`);
+  console.log(`覆盖 ${sections.length} 个版本：${versions.map((item) => `v${item}`).join(" → ")}`);
 } else {
   console.log("发布区间：无起点（首次发布或 --since none），只写当前版本");
 }
-console.log(`--- v${version} 段落（前 6 行）---`);
-console.log(sections[0].section.split(/\r?\n/).slice(0, 6).join("\n"));
+
+// 同一件事被多个版本反复改的，措辞要合成一句再发（v0.4.4 加磁吸、v0.4.5 修磁吸
+// → "新增磁吸"）。脚本认不出哪几条该合并，只把疑似同主题的挑出来给人看。
+const suspects = likelyDuplicates(sections);
+if (suspects.length) {
+  console.warn("");
+  console.warn("⚠️  下面这些条目可能讲的是同一件事，发之前请合并成一句：");
+  for (const item of suspects) {
+    console.warn(`    · ${item.a}  ×  ${item.b}   （共 "${item.shared}"）`);
+  }
+  console.warn("   （只影响措辞，不改就发也不会报错）");
+}
+
+console.log("");
+console.log(`--- 归并稿前 12 行 ---`);
+console.log(notes.split(/\r?\n/).slice(0, 12).join("\n"));
 console.log("---");
 console.log(
-  `下一步：gh release create v${version} WSight.exe docs/*.png --notes-file "${target}"`,
+  `下一步：核对措辞并合并同主题条目，然后\n` +
+    `  gh release create v${version} WSight.exe docs/*.png --notes-file "${target}"`,
 );

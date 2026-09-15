@@ -98,6 +98,9 @@ export function changelogSectionsSince(changelogText, newest, oldestExclusive = 
 /**
  * 把若干段落拼成一份发布说明：段落之间用 `---` 隔开，最新的在最前面。
  *
+ * 注意：这是**逐版本**的拼法，已经不用于发布说明（见 `mergeSections`）。
+ * 留着是因为"按版本看历史"这个视角本身还有用（例如人工核对区间）。
+ *
  * @param {{version: string, section: string}[]} sections
  * @returns {string}
  */
@@ -106,17 +109,164 @@ export function joinSections(sections) {
 }
 
 /**
- * 段落里的第一行"有内容的话"，用来粗判两份文案是不是同一个东西。
- * 跳过标题行、空行、`###` 小标题。
- *
- * @param {string} section
- * @returns {string|null}
+ * 类别顺序：发布说明里先讲得到了什么，再讲变好的地方，最后讲修掉的毛病。
  */
-export function firstContentLine(section) {
-  for (const raw of section.split(/\r?\n/)) {
-    const line = raw.trim();
-    if (!line || line.startsWith("#")) continue;
-    return line;
+export const CATEGORY_ORDER = ["新增", "改进", "修复", "其它"];
+
+const CATEGORY_RULES = [
+  ["新增", /^(added|new|feature|新增|增加|新功能)/i],
+  ["修复", /^(fixed|fix|bug|修复|修正)/i],
+  ["改进", /^(changed|improved|perf|改进|优化|调整|变更|改善)/i],
+];
+
+/**
+ * 小标题 → 类别。各版本用的小节名不统一（`### Added` 与 `### 修复：开机启动` 混着来），
+ * 这里收拢成同一套类别，好让不同版本的同性质条目并到一起。
+ *
+ * @param {string} heading 去掉 `#` 之后的小标题文字
+ * @returns {string}
+ */
+function categorize(heading) {
+  for (const [category, pattern] of CATEGORY_RULES) {
+    if (pattern.test(heading)) return category;
   }
-  return null;
+  return "其它";
+}
+
+/**
+ * 把一个版本段落拆成条目，每条带上它所属的类别。
+ *
+ * 条目是列表项（`- xxx` 或 `1. xxx`），其后的缩进行算它的续行 —— CHANGELOG 里的
+ * 条目常常写好几段，拆散了读不通。小标题只用来定类别，本身不进条目。
+ *
+ * @param {string} section 含版本标题行的完整段落
+ * @returns {{category: string, lines: string[]}[]}
+ */
+export function sectionEntries(section) {
+  const entries = [];
+  let category = null;
+  let current = null;
+
+  const flush = () => {
+    if (current && current.lines.join("").trim()) entries.push(current);
+    current = null;
+  };
+
+  for (const raw of section.split(/\r?\n/)) {
+    const line = raw.trimEnd();
+    const trimmed = line.trim();
+    if (!trimmed) {
+      if (current) current.lines.push("");
+      continue;
+    }
+    // 版本标题（`## [0.4.5] - 2026-09-15`）：不属于任何一个类别
+    if (/^##\s+\[?\d/.test(trimmed)) {
+      flush();
+      category = null;
+      continue;
+    }
+    if (/^#{2,4}\s+/.test(trimmed)) {
+      flush();
+      category = categorize(trimmed.replace(/^#{2,4}\s+/, ""));
+      continue;
+    }
+    const isItem = /^(?:[-*]|\d+\.)\s+/.test(trimmed);
+    if (isItem) {
+      flush();
+      current = { category: category ?? "其它", lines: [trimmed] };
+      continue;
+    }
+    // 缩进行是上一条的续行；顶格的散句自成一条
+    if (current && line !== trimmed) {
+      current.lines.push(line);
+      continue;
+    }
+    flush();
+    current = { category: category ?? "其它", lines: [trimmed] };
+  }
+  flush();
+
+  return entries.map((entry) => ({ ...entry, lines: trimBlankEdges(entry.lines) }));
+}
+
+function trimBlankEdges(lines) {
+  const out = [...lines];
+  while (out.length && !out[0].trim()) out.shift();
+  while (out.length && !out[out.length - 1].trim()) out.pop();
+  return out;
+}
+
+/**
+ * 把"发布区间"里的若干版本段落**归并成一份说明**。
+ *
+ * 这是发布说明的正确口径：读者要的是"从上次发版到现在，这东西一共变成了什么样"，
+ * 不是"每个版本号底下各干了什么"。所以逐版本标题被去掉，条目按类别并到一起。
+ *
+ * 归并只做到"同类合并"这一步 —— 同一件事在多个版本里被反复改动的（先加上、后修好），
+ * 措辞层面的合并要人来看，脚本只把材料摆整齐，并在每条前留一行
+ * `<!-- vX.Y.Z -->` 注释标明出处（Markdown 渲染时不显示）。
+ *
+ * @param {{version: string, section: string}[]} sections
+ * @returns {string}
+ */
+export function mergeSections(sections) {
+  /** @type {Map<string, {version: string, text: string}[]>} */
+  const groups = new Map(CATEGORY_ORDER.map((name) => [name, []]));
+
+  for (const { version, section } of sections) {
+    for (const entry of sectionEntries(section)) {
+      const bucket = groups.get(entry.category) ?? groups.get("其它");
+      bucket.push({ version, text: entry.lines.join("\n") });
+    }
+  }
+
+  const parts = [];
+  for (const name of CATEGORY_ORDER) {
+    const items = groups.get(name);
+    if (!items.length) continue;
+    const body = items
+      .map((item) => `<!-- v${item.version} -->\n${item.text}`)
+      .join("\n");
+    parts.push(`### ${name}\n\n${body}`);
+  }
+
+  return parts.length ? `${parts.join("\n\n")}\n` : "";
+}
+
+/**
+ * 挑出"可能讲的是同一件事"的条目，供人合并时参考。
+ *
+ * 判据很土：把每条的第一个加粗短语当作主题，去掉标点与常见虚词后取字符交集，
+ * 交集里有 2 个字以上就算疑似。宁可多报 —— 它只往 stderr 打提示，不影响输出。
+ *
+ * @param {{version: string, section: string}[]} sections
+ * @returns {{a: string, b: string, shared: string}[]}
+ */
+export function likelyDuplicates(sections) {
+  const STOP = new Set("的了不在与和之一款并及其以对为个");
+  const themes = [];
+  for (const { version, section } of sections) {
+    for (const entry of sectionEntries(section)) {
+      const bold = entry.lines.join(" ").match(/\*\*(.+?)\*\*/);
+      if (!bold) continue;
+      const chars = new Set(
+        bold[1].replace(/[^\u4e00-\u9fa5A-Za-z0-9]/g, "").split(""),
+      );
+      themes.push({ version, chars, label: `${bold[1]}（v${version}）` });
+    }
+  }
+
+  const pairs = [];
+  for (let i = 0; i < themes.length; i++) {
+    for (let j = i + 1; j < themes.length; j++) {
+      if (themes[i].version === themes[j].version) continue;
+      const shared = [...themes[i].chars].filter(
+        (c) => themes[j].chars.has(c) && !STOP.has(c),
+      );
+      if (shared.length >= 2) {
+        pairs.push({ a: themes[i].label, b: themes[j].label, shared: shared.join("") });
+      }
+    }
+  }
+  return pairs;
 }

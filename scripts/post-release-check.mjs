@@ -11,8 +11,10 @@
  *   3. 远端最后一条提交说明只有那两个词之一
  *   4. 标签 v<版本> 存在，且指向 HEAD
  *   5. Release 存在，附件里有 WSight.exe（少截图只警告）
- *   6. Release 说明覆盖了"上一个已发布标签 → 本次版本"区间里的**每一个** CHANGELOG
- *      段落 —— 只提交、没发过 Release 的中间版本，必须跟着本次一起露脸
+ *   6. Release 说明覆盖了"上一个已发布标签 → 本次版本"区间里的**每一个**版本，
+ *      并且是**归并稿**——按内容归类，不是逐版本罗列。只提交、没发过 Release 的
+ *      中间版本必须跟着本次一起露脸；同一处功能的多轮改动（先加上、后修好）
+ *      应该合并成一句，而不是把两轮都写上去。
  *
  * 有 ❌ 退出码 1 —— 可以直接接在发布流程末尾当守门员。
  */
@@ -21,7 +23,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { changelogSectionsSince, firstContentLine } from "./lib/changelog-section.mjs";
+import { changelogSectionsSince, sectionEntries } from "./lib/changelog-section.mjs";
 import { previousReleaseTag } from "./lib/release-range.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -74,6 +76,26 @@ function ghApi(path) {
 
 const gh = findGh();
 const short = (sha) => (sha ? sha.slice(0, 7) : "(未知)");
+
+/**
+ * 一个版本段落里的"主题指纹"：各条目开头那个加粗短语的前两个字。
+ *
+ * 发布说明会把措辞重写、把同主题的条目并成一句，所以逐字比对行不通；但"这一版谈过
+ * 磁吸、谈过天气、谈过设置"这种主题不该凭空消失 —— 拿它对一下，能发现"说明是另写的一份"。
+ *
+ * @param {string} section
+ * @returns {string[]}
+ */
+function themeFingerprints(section) {
+  const prints = [];
+  for (const entry of sectionEntries(section)) {
+    for (const piece of entry.lines.join(" ").match(/\*\*(.+?)\*\*/g) ?? []) {
+      const core = piece.replace(/\*\*/g, "").replace(/[^\u4e00-\u9fa5A-Za-z0-9]/g, "");
+      if (core.length >= 2) prints.push(core.slice(0, 2));
+    }
+  }
+  return prints;
+}
 
 console.log(`WSight v${version} 发版自检\n`);
 
@@ -192,27 +214,55 @@ if (!gh) {
             `CHANGELOG.md 里划不出区间（起点 ${fromTag ?? "无"}）`,
           );
         } else {
-          const missing = sections
-            .filter((item) => {
-              const probe = firstContentLine(item.section);
-              return probe && !body.includes(probe);
-            })
-            .map((item) => `v${item.version}`);
           const range = fromVersion ? `${fromTag} 之后 → v${version}` : `v${version}`;
 
+          // 6a. 区间里每个版本都得在说明里露过面
+          const mentioned = new Set([...body.matchAll(/v?(\d+\.\d+\.\d+)/g)].map((m) => m[1]));
+          const missing = sections
+            .filter((item) => !mentioned.has(item.version))
+            .map((item) => `v${item.version}`);
           if (missing.length) {
             add(
               "fail",
               "Release 说明覆盖全部改动",
-              `区间（${range}）里 ${missing.join(" / ")} 的内容没出现在说明里` +
+              `区间（${range}）里 ${missing.join(" / ")} 没在说明里露面` +
                 ` —— 漏带了只提交、没发过 Release 的版本`,
             );
           } else {
+            add("ok", "Release 说明覆盖全部改动", `${range}，共 ${sections.length} 个版本`);
+          }
+
+          // 6b. 说明要讲"一共改了什么"，不是"每个版本各干了什么"
+          const headings = [...body.matchAll(/^#{2,3}\s+\[?(\d+\.\d+\.\d+)/gm)].map((m) => m[1]);
+          if (headings.length >= 2) {
             add(
-              "ok",
-              "Release 说明覆盖全部改动",
-              `${range}，共 ${sections.length} 个版本，与 CHANGELOG 同源`,
+              "fail",
+              "Release 说明已归并",
+              `说明里还按版本分段（${headings.join(" / ")}）—— 读者要看的是这次一共改了什么，` +
+                `同一处功能的多轮改动应合并成一句`,
             );
+          } else {
+            add("ok", "Release 说明已归并", "按内容归类，未逐版本罗列");
+          }
+
+          // 6c. 同源：措辞可以重写，主题不该丢
+          const shortfalls = [];
+          for (const item of sections) {
+            const prints = themeFingerprints(item.section);
+            if (!prints.length) continue;
+            const hits = prints.filter((print) => body.includes(print)).length;
+            if (hits * 2 < prints.length) {
+              shortfalls.push(`v${item.version}（${hits}/${prints.length}）`);
+            }
+          }
+          if (shortfalls.length) {
+            add(
+              "warn",
+              "Release 说明与 CHANGELOG 同源",
+              `${shortfalls.join(" / ")} 的主题词在说明里几乎找不到 —— 确认不是另写了一份`,
+            );
+          } else {
+            add("ok", "Release 说明与 CHANGELOG 同源", "各版本谈过的主题都能在说明里对上");
           }
         }
       }
