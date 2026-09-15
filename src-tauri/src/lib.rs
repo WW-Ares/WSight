@@ -9,7 +9,7 @@ mod weather;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -98,14 +98,87 @@ const CORNER_MARGIN: f64 = 40.0;
 // Only while 调整 is on: at rest the widgets are locked, so nothing can be
 // dragged into a position that would need snapping anyway.
 
-/// How close an edge has to be, in logical px, before it lets go and snaps.
-/// Small enough to be reached on purpose, large enough to be reached by
-/// accident - which is the whole point.
-const SNAP_PX: f64 = 14.0;
+/// How close an edge has to be, in logical px, before it is drawn in.
+///
+/// 8 sits at the light end of what published implementations use - the HarmonyOS
+/// PC window-API walkthrough recommends 8-15px and ships 10, a Win32
+/// magnetic-window sample uses 8, and Windows' own `SnapAssistDistance` defaults
+/// to 16px (documented range 4-16). We are at the low end on purpose: those
+/// systems can afford a wide field because the window there keeps following the
+/// pointer and only the *preview* snaps, while here the window itself is pulled
+/// onto the line, and every pixel of field is a pixel the widget does not move
+/// under the pointer.
+const SNAP_PX: f64 = 8.0;
+
+/// Once a line has hold of the widget, the pointer has to travel this far from
+/// it before the widget lets go - 1.5x the distance it took to catch.
+///
+/// This is the "排斥区" the same implementations insist on: with a single
+/// threshold, a pointer resting on the edge of the field makes the widget
+/// flicker between the line and the pointer. It only has to out-size the
+/// wobble of a slow drag, though - not a deliberate pull - so it is kept near
+/// the catching distance.
+const SNAP_ESCAPE_PX: f64 = 12.0;
 
 /// Guards the move we make *because* of a snap from being read as the user
 /// moving the window again.
 static SNAPPING: AtomicBool = AtomicBool::new(false);
+
+/// What the magnet needs to remember between one `Moved` and the next.
+///
+/// Nothing here is bookkeeping for its own sake - the window move loop makes
+/// all three necessary. It reports each `Moved` as *the position we last gave
+/// the window* plus the pointer's own delta, which means a snap we apply
+/// becomes the reference for the next event: the two pixels the pointer spent
+/// pulling away are added to the line instead of to the pointer's travel, and
+/// are gone. A widget under a real drag can therefore never escape a line, no
+/// matter how far it is pulled - which is exactly what "磁吸太紧，拖不动" is.
+/// So we keep the running total ourselves.
+#[derive(Clone, Copy, Default)]
+struct SnapTrack {
+    /// The last position handed to the window - what the move loop measures from.
+    reported: Option<(f64, f64)>,
+    /// Where the widget would be if there were no magnet at all: `reported`
+    /// plus every movement the pointer has made while we were holding a line.
+    free: Option<(f64, f64)>,
+    /// The line each axis is currently held by, in logical px.
+    held: (Option<f64>, Option<f64>),
+}
+
+static SNAP: Mutex<SnapTrack> = Mutex::new(SnapTrack {
+    reported: None,
+    free: None,
+    held: (None, None),
+});
+
+/// Until this moment (ms since the epoch) a `Moved` event is not a drag.
+///
+/// The arrow-key nudge moves the widget on purpose, one pixel at a time; if the
+/// magnet were listening it would swallow every step. A short quiet window
+/// rather than a one-shot flag: a nudge can report more than one `Moved`, the
+/// event may arrive on either side of the command returning, and holding the
+/// key down repeats it every ~30ms - all three are covered by "no snapping for
+/// a moment after the last nudge".
+static NUDGE_UNTIL_MS: AtomicU64 = AtomicU64::new(0);
+const NUDGE_QUIET_MS: u64 = 250;
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Forget where the magnet thought the widget and the pointer were.
+///
+/// For the moments the widget is moved by something other than a drag - a
+/// nudge, a reset, entering or leaving 调整 - where the next `Moved` is a
+/// fresh start rather than a delta on top of an older one.
+fn reset_snap_track() {
+    if let Ok(mut track) = SNAP.lock() {
+        *track = SnapTrack::default();
+    }
+}
 
 /// A window's rectangle in logical px: `(x, y, w, h)`.
 fn widget_rect(win: &tauri::WebviewWindow) -> Option<(f64, f64, f64, f64)> {
@@ -120,9 +193,25 @@ fn widget_rect(win: &tauri::WebviewWindow) -> Option<(f64, f64, f64, f64)> {
     ))
 }
 
-/// Snap one axis: return the coordinate nearest to `cur` among the lines this
-/// widget could align to, or `cur` itself when none of them is close enough.
-fn snap_axis(cur: f64, len: f64, other: f64, other_len: f64) -> f64 {
+/// Snap one axis: return `(coordinate, line it is held by)`.
+///
+/// `held` is the line this axis was on last time. A line that already has hold
+/// keeps it until the pointer pulls past `SNAP_ESCAPE_PX`; only then is the
+/// field consulted again from scratch. Deciding afresh on every event - which
+/// is what a single threshold amounts to - is what makes a magnet feel stuck.
+fn snap_axis(
+    cur: f64,
+    len: f64,
+    other: f64,
+    other_len: f64,
+    held: Option<f64>,
+) -> (f64, Option<f64>) {
+    if let Some(line) = held {
+        if (line - cur).abs() <= SNAP_ESCAPE_PX {
+            return (line, Some(line));
+        }
+    }
+
     let candidates = [
         other,
         other + other_len - len,
@@ -132,6 +221,7 @@ fn snap_axis(cur: f64, len: f64, other: f64, other_len: f64) -> f64 {
     ];
     let mut best = cur;
     let mut best_gap = SNAP_PX;
+    let mut lock = None;
     for candidate in candidates {
         let gap = (candidate - cur).abs();
         // `<=` so a later, equally close line wins - they are ordered
@@ -139,9 +229,10 @@ fn snap_axis(cur: f64, len: f64, other: f64, other_len: f64) -> f64 {
         if gap <= best_gap {
             best_gap = gap;
             best = candidate;
+            lock = Some(candidate);
         }
     }
-    best
+    (best, lock)
 }
 
 /// Pull a widget that is being moved onto its neighbour's alignment lines.
@@ -150,9 +241,17 @@ fn snap_axis(cur: f64, len: f64, other: f64, other_len: f64) -> f64 {
 /// snapping moves the window, which emits another `Moved`, and without the
 /// flag that second event would run the whole calculation again from inside
 /// the first - harmless in effect, but a recursive call for no reason.
+///
+/// The position reported here is *not* where the pointer is - see `SnapTrack` -
+/// so the magnet decides on the tracked free position instead, and the reported
+/// one only serves to advance it.
 fn snap_widget(window: &tauri::Window) {
     let label = window.label();
     if !is_adjusting(label) {
+        return;
+    }
+    // Arrow keys are the user aiming at a pixel; the magnet stays out of it.
+    if now_ms() < NUDGE_UNTIL_MS.load(Ordering::SeqCst) {
         return;
     }
     if SNAPPING.swap(true, Ordering::SeqCst) {
@@ -161,27 +260,51 @@ fn snap_widget(window: &tauri::Window) {
 
     let app = window.app_handle();
     let neighbour_label = if label == "monitor" { "weather" } else { "monitor" };
-    let moved = app.get_webview_window(label).and_then(|moving| {
-        let other = app.get_webview_window(neighbour_label)?;
-        // A hidden neighbour is not on screen to align with - and its stored
-        // rectangle would be the last place it was seen, which is worse than
-        // no snapping at all.
-        if !other.is_visible().unwrap_or(false) {
-            return None;
+    if let Some(moving) = app.get_webview_window(label) {
+        if let Some(other) = app.get_webview_window(neighbour_label) {
+            // A hidden neighbour is not on screen to align with - and its stored
+            // rectangle would be the last place it was seen, which is worse than
+            // no snapping at all.
+            if other.is_visible().unwrap_or(false) {
+                if let (Some((x, y, w, h)), Some((ox, oy, ow, oh))) =
+                    (widget_rect(&moving), widget_rect(&other))
+                {
+                    let (free, held_x, held_y) = SNAP
+                        .lock()
+                        .map(|track| match (track.reported, track.free) {
+                            (Some(prev), Some(free)) => (
+                                (free.0 + (x - prev.0), free.1 + (y - prev.1)),
+                                track.held.0,
+                                track.held.1,
+                            ),
+                            _ => ((x, y), None, None),
+                        })
+                        .unwrap_or(((x, y), None, None));
+
+                    let (nx, lock_x) = snap_axis(free.0, w, ox, ow, held_x);
+                    let (ny, lock_y) = snap_axis(free.1, h, oy, oh, held_y);
+                    let applied = if (nx - x).abs() >= 0.5 || (ny - y).abs() >= 0.5 {
+                        if moving
+                            .set_position(tauri::LogicalPosition::new(nx, ny))
+                            .is_ok()
+                        {
+                            (nx, ny)
+                        } else {
+                            (x, y)
+                        }
+                    } else {
+                        (x, y)
+                    };
+
+                    if let Ok(mut track) = SNAP.lock() {
+                        track.reported = Some(applied);
+                        track.free = Some(free);
+                        track.held = (lock_x, lock_y);
+                    }
+                }
+            }
         }
-        let (x, y, w, h) = widget_rect(&moving)?;
-        let (ox, oy, ow, oh) = widget_rect(&other)?;
-        let nx = snap_axis(x, w, ox, ow);
-        let ny = snap_axis(y, h, oy, oh);
-        if (nx - x).abs() < 0.5 && (ny - y).abs() < 0.5 {
-            return None;
-        }
-        moving
-            .set_position(tauri::LogicalPosition::new(nx, ny))
-            .ok()?;
-        Some(())
-    });
-    let _ = moved;
+    }
 
     SNAPPING.store(false, Ordering::SeqCst);
 }
@@ -738,6 +861,7 @@ fn reset_widget_positions(app: AppHandle, state: State<'_, AppState>) -> Result<
     }
 
     let (x, mut y) = default_origin(&app);
+    reset_snap_track();
     for label in ["monitor", "weather"] {
         if let Some(win) = app.get_webview_window(label) {
             let _ = win.set_position(tauri::LogicalPosition::new(x, y));
@@ -800,6 +924,7 @@ fn set_widget_adjust(app: AppHandle, label: String, adjusting: bool) -> Result<(
     };
     win.set_resizable(adjusting).map_err(|e| e.to_string())?;
     adjusting_flag(&label).store(adjusting, Ordering::Relaxed);
+    reset_snap_track();
     if adjusting {
         zorder::to_front(&win);
         // Arrow-key nudging needs the keyboard, and the widgets are built
@@ -818,8 +943,12 @@ fn set_widget_adjust(app: AppHandle, label: String, adjusting: bool) -> Result<(
 /// Native rather than front-end driven: the position the webview can read is
 /// affected by its own transform and by DPI rounding, while `outer_position`
 /// is the real window rectangle. Going through it also means the move lands in
-/// the same `Moved` hook as a drag, so nudging snaps and is remembered exactly
-/// the way dragging is.
+/// the same `Moved` hook as a drag, so where the widget ends up is remembered
+/// the same way a drag is.
+///
+/// The magnet is *not* part of this: nudging is the user placing the widget on
+/// an exact pixel, and a snap that undoes the step would make the keys useless
+/// anywhere near the neighbour.
 #[tauri::command]
 fn nudge_widget(app: AppHandle, label: String, dx: f64, dy: f64) -> Result<(), String> {
     if label != "monitor" && label != "weather" {
@@ -834,6 +963,8 @@ fn nudge_widget(app: AppHandle, label: String, dx: f64, dy: f64) -> Result<(), S
     let Some((x, y, _, _)) = widget_rect(&win) else {
         return Err("无法读取窗口位置".to_string());
     };
+    NUDGE_UNTIL_MS.store(now_ms() + NUDGE_QUIET_MS, Ordering::SeqCst);
+    reset_snap_track();
     win.set_position(tauri::LogicalPosition::new(x + dx, y + dy))
         .map_err(|e| e.to_string())
 }

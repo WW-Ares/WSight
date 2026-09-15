@@ -9,7 +9,7 @@
  */
 
 /** Semantic version of the app. Must match `tauri.conf.json`. */
-export const APP_VERSION = "0.4.4";
+export const APP_VERSION = "0.4.5";
 
 /** Public repository - the target of the "开源主页" button. */
 export const REPO_URL = "https://github.com/WW-Ares/WSight";
