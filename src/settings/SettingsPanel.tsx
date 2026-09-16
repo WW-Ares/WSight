@@ -302,6 +302,28 @@ function updateText(s: UpdateStatus | null, auto: boolean): string {
   }
 }
 
+/**
+ * Release notes arrive as the GitHub release body - markdown, because that is
+ * what a release page renders. This panel shows them in a `<pre>` with no
+ * markdown renderer behind it, so the markers have to go or the user sits
+ * reading asterisks and hash signs. Only the decoration is dropped: the words,
+ * the line breaks and the bullets are the part worth keeping.
+ */
+function plainNotes(markdown: string): string {
+  return markdown
+    .split("\n")
+    .filter((line) => !/^\s*(-{3,}|_{3,}|\*{3,})\s*$/.test(line))
+    .map((line) =>
+      line
+        .replace(/^\s{0,3}#{1,6}\s+/, "")
+        .replace(/\*\*(.+?)\*\*/g, "$1")
+        .replace(/`([^`]+)`/g, "$1"),
+    )
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 /** Which colour the status dot wears. */
 function updateTone(s: UpdateStatus | null): string {
   if (!s) return "idle";
@@ -1216,7 +1238,7 @@ export function SettingsPanel({ initial }: { initial: AppConfig }) {
             {upd?.notes && (updState === "ready" || updState === "available") ? (
               <details className="st-upd-notes">
                 <summary>本次更新内容</summary>
-                <pre>{upd.notes}</pre>
+                <pre>{plainNotes(upd.notes)}</pre>
               </details>
             ) : null}
 

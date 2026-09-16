@@ -480,7 +480,8 @@ pub async fn check(app: AppHandle, manual: bool) {
             s.state = "ready".to_string();
             s.latest = version;
             s.staged = s.latest.clone();
-            s.verified = Some(verified);
+            // `None` when the build was already staged before this check ran.
+            s.verified = verified;
             s.progress = 100.0;
         }
         Ok(Outcome::Available { version }) => {
@@ -488,8 +489,21 @@ pub async fn check(app: AppHandle, manual: bool) {
             s.latest = version;
         }
         Err(message) => {
-            s.state = "error".to_string();
-            s.error = message;
+            // A background failure stays invisible. The network being down is
+            // not a defect, and it must never bury a build that is already
+            // sitting on disk waiting for a restart - that is the one thing on
+            // this page the user can still act on.
+            if manual {
+                s.state = "error".to_string();
+                s.error = message;
+            } else {
+                s.state = if s.staged.is_empty() {
+                    "idle".to_string()
+                } else {
+                    "ready".to_string()
+                };
+                s.error.clear();
+            }
         }
     });
 
@@ -499,12 +513,34 @@ pub async fn check(app: AppHandle, manual: bool) {
 enum Outcome {
     UpToDate,
     Available { version: String },
-    Ready { version: String, verified: bool },
+    /// `verified` is `None` when the build on disk had already been staged
+    /// before this check ran: the digest result died with the process that
+    /// made it, and the UI has a wording for exactly that rather than
+    /// inventing one.
+    Ready {
+        version: String,
+        verified: Option<bool>,
+    },
 }
 
 async fn run_check(app: &AppHandle, manual: bool) -> Result<Outcome, String> {
     let client = http_client()?;
     let release = latest_release(&client).await?;
+
+    // Already holding a build at least as new as anything published: keep it.
+    //
+    // This is not merely an optimisation. The comparison below is against the
+    // version *running*, which is still the old one until the user restarts —
+    // so without this the loop would re-download the same 10 MB every six
+    // hours, and a release that has since been pulled would be reported as
+    // "已是最新" and wipe the ready prompt the user was about to act on.
+    let staged = read_config(app).update_staged_version;
+    if !staged.is_empty() && staged_path().exists() && !is_newer(&release.version, &staged) {
+        return Ok(Outcome::Ready {
+            version: staged,
+            verified: None,
+        });
+    }
 
     if !is_newer(&release.version, current_version()) {
         return Ok(Outcome::UpToDate);
@@ -548,7 +584,7 @@ async fn run_check(app: &AppHandle, manual: bool) -> Result<Outcome, String> {
 
     Ok(Outcome::Ready {
         version: release.version,
-        verified,
+        verified: Some(verified),
     })
 }
 
