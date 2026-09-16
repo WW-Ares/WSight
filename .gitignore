@@ -19,6 +19,9 @@ src-tauri/gen/
 # --- design reference copied from another product's UI ----------------------
 参考.png
 
+# --- AI assistant workspace memory (local only) -----------------------------
+.workbuddy/
+
 # --- OS / editor ------------------------------------------------------------
 .DS_Store
 Thumbs.db
