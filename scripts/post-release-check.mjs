@@ -9,7 +9,9 @@
  *   1. 工作区干净（发版完不该还有没提交的改动）
  *   2. 本地 HEAD 与远端 main 一致（推上去了、也没落后）
  *   3. 远端最后一条提交说明只有那两个词之一
- *   4. 标签 v<版本> 存在，且指向 HEAD
+ *   4. 标签 v<版本> 存在，且指向 HEAD —— 或者从标签到 HEAD 之间只有"不进包"的改动
+ *      （发版后补 README、改发布脚本都是常态，那些改动不该报红；但动了源码、依赖、
+ *      配置就意味着发出去的包和仓库对不上，必须重新发版）
  *   5. Release 存在，附件里有 WSight.exe（且**只该有它**，夹带截图会提醒），并且附件的
  *      sha256 与本地 WSight.exe 一致 —— 名字对不代表内容对：v0.5.0 传上去的那个包
  *      名字没错、大小正常，前端却是上一个版本的，只查名字根本查不出来
@@ -39,6 +41,24 @@ const REQUIRED_ASSET = "WSight.exe";
  * 能跑的程序，混着几张 png 只会让"下载哪个"变含糊。这条按大王 2026-09-16 的要求定下。
  */
 const IMAGE_ASSET = /\.(png|jpe?g|gif|webp|bmp)$/i;
+/**
+ * 发版后允许追加提交的文件：只有这些，标签才可以不严格等于 HEAD。
+ *
+ * 判据是"会不会进包"。README、更新日志、许可、文档、发布脚本都是给人看或给流程用的，
+ * 改了不影响已经上传的那份 exe；`src/`、`src-tauri/`、依赖与构建配置一旦动了，标签
+ * 指向的二进制就不再代表仓库当前状态，那时该重新发版，而不是把标签往后挪。
+ *
+ * 写成白名单而不是黑名单：新增的目录默认算"会进包"，宁可多报一次红，也不要因为
+ * 忘了把它加进黑名单而放过一次"发了没重编的包"。
+ */
+const DOES_NOT_SHIP = [
+  /^README\.md$/,
+  /^CHANGELOG\.md$/,
+  /^LICENSE$/,
+  /^\.gitignore$/,
+  /^docs\//,
+  /^scripts\//,
+];
 
 const version =
   process.argv[2] ?? JSON.parse(readFileSync(join(root, "package.json"), "utf8")).version;
@@ -60,6 +80,32 @@ function tryRun(cmd, args) {
     const err = `${error.stderr ?? ""}${error.message ?? ""}`.trim();
     return { ok: false, out: `${error.stdout ?? ""}`.trim(), err };
   }
+}
+
+/**
+ * 标签之后是不是"只改了不进包的东西"。
+ *
+ * 返回 `{ ok: true, files }` 表示可以放过，理由里列出改了哪些文件；
+ * 否则给出失败原因，直接写进 ❌ 的说明里。
+ *
+ * @param {string} tagSha
+ * @param {string} headSha
+ * @returns {{ok: true, files: string[]} | {ok: false, why: string}}
+ */
+function noShipChangesSince(tagSha, headSha) {
+  if (!tagSha || !headSha) return { ok: false, why: "拿不到提交号" };
+  // 标签必须还在 HEAD 的历史上。否则是改了历史或推错了分支，比"补了文档"严重得多。
+  if (!tryRun("git", ["merge-base", "--is-ancestor", tagSha, headSha]).ok) {
+    return { ok: false, why: "标签不在 HEAD 的历史上（改过历史或推错了分支）" };
+  }
+  const diff = tryRun("git", ["diff", "--name-only", `${tagSha}..${headSha}`]);
+  if (!diff.ok) return { ok: false, why: "git diff 失败" };
+  const files = diff.out.split("\n").map((line) => line.trim()).filter(Boolean);
+  const touched = files.filter((file) => !DOES_NOT_SHIP.some((re) => re.test(file)));
+  if (touched.length) {
+    return { ok: false, why: `标签之后动过会进包的东西：${touched.slice(0, 3).join(" / ")}` };
+  }
+  return { ok: true, files };
 }
 
 function findGh() {
@@ -174,11 +220,20 @@ if (!gh) {
       if (target && headSha && target === headSha) {
         add("ok", `标签 v${version} 指向 HEAD`, short(target));
       } else {
-        add(
-          "fail",
-          `标签 v${version} 指向 HEAD`,
-          `标签指向 ${short(target)}，HEAD 是 ${short(headSha)}`,
-        );
+        const trailing = noShipChangesSince(target, headSha);
+        if (trailing.ok) {
+          add(
+            "ok",
+            `标签 v${version} 指向 HEAD（之后只有不进包的改动）`,
+            `标签在 ${short(target)}，之后改动：${trailing.files.join(" / ")} —— 发的是那一版二进制，不用重发`,
+          );
+        } else {
+          add(
+            "fail",
+            `标签 v${version} 指向 HEAD`,
+            `标签指向 ${short(target)}，HEAD 是 ${short(headSha)}；${trailing.why}`,
+          );
+        }
       }
     }
 
