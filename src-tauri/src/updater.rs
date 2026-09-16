@@ -122,6 +122,17 @@ fn with_status<T>(f: impl FnOnce(&mut UpdateStatus) -> T) -> T {
     f(&mut guard)
 }
 
+/// One line into the app's log, prefixed so it can be told apart from the
+/// start-up lines in the same file.
+///
+/// A background check that fails on purpose says nothing in the UI - a network
+/// being down is not the user's problem - which leaves the feature with no
+/// evidence at all when it does break. The log is where that evidence goes;
+/// `%APPDATA%\WSight\launch.log` is the file support already asks for.
+fn note(line: &str) {
+    crate::launchlog::log(&format!("update: {line}"));
+}
+
 pub fn snapshot() -> UpdateStatus {
     with_status(|s| {
         // A staged update recorded in the config outlives the download's own
@@ -292,7 +303,16 @@ struct Release {
 fn http_client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .user_agent(USER_AGENT)
-        .timeout(Duration::from_secs(30))
+        // Deliberately no total-request deadline. reqwest's `timeout` covers
+        // the whole request *including the body*, so a 5 MB download on a slow
+        // link gets killed while it is still making progress. Measured against
+        // the real release: 21 s for 5 MB, which is 70% of a 30 s deadline -
+        // two earlier runs died on it and the only trace was "check ran but
+        // nothing arrived".
+        .connect_timeout(Duration::from_secs(20))
+        // What a download does need guarding against is a connection that goes
+        // quiet halfway, and that is a per-read question, not a total one.
+        .read_timeout(Duration::from_secs(30))
         .build()
         .map_err(|e| format!("无法创建 HTTP 客户端: {e}"))
 }
@@ -300,6 +320,9 @@ fn http_client() -> Result<reqwest::Client, String> {
 async fn latest_release(client: &reqwest::Client) -> Result<Release, String> {
     let response = client
         .get(RELEASES_API)
+        // The API answer is ~12 KB, so here a total deadline is the right
+        // shape: either it arrives quickly or something is wrong.
+        .timeout(Duration::from_secs(30))
         .header("Accept", "application/vnd.github+json")
         .header("X-GitHub-Api-Version", "2022-11-28")
         .send()
@@ -466,27 +489,43 @@ pub async fn check(app: AppHandle, manual: bool) {
         s.state = "checking".to_string();
         s.error.clear();
     });
+    note(&format!(
+        "check ({}) running {} -> {}",
+        if manual { "manual" } else { "auto" },
+        current_version(),
+        staged_or_dash(),
+    ));
 
     let result = run_check(&app, manual).await;
 
-    with_status(|s| match result {
+    let summary = with_status(|s| match result {
         Ok(Outcome::UpToDate) => {
             s.state = "uptodate".to_string();
             s.latest.clear();
             s.notes.clear();
             s.staged.clear();
+            "up to date".to_string()
         }
         Ok(Outcome::Ready { version, verified }) => {
             s.state = "ready".to_string();
-            s.latest = version;
+            s.latest = version.clone();
             s.staged = s.latest.clone();
             // `None` when the build was already staged before this check ran.
             s.verified = verified;
             s.progress = 100.0;
+            format!(
+                "ready {version} ({})",
+                match verified {
+                    Some(true) => "digest verified",
+                    Some(false) => "size only, no digest published",
+                    None => "already staged",
+                }
+            )
         }
         Ok(Outcome::Available { version }) => {
             s.state = "available".to_string();
-            s.latest = version;
+            s.latest = version.clone();
+            format!("available {version} (auto download off)")
         }
         Err(message) => {
             // A background failure stays invisible. The network being down is
@@ -495,7 +534,7 @@ pub async fn check(app: AppHandle, manual: bool) {
             // this page the user can still act on.
             if manual {
                 s.state = "error".to_string();
-                s.error = message;
+                s.error = message.clone();
             } else {
                 s.state = if s.staged.is_empty() {
                     "idle".to_string()
@@ -504,10 +543,23 @@ pub async fn check(app: AppHandle, manual: bool) {
                 };
                 s.error.clear();
             }
+            format!("failed: {message}")
         }
     });
+    note(&summary);
 
     touch_config(&app, |cfg| cfg.update_last_check = now_secs());
+}
+
+/// For the log line only: what is staged right now, or `-`.
+fn staged_or_dash() -> String {
+    with_status(|s| {
+        if s.staged.is_empty() {
+            "-".to_string()
+        } else {
+            s.staged.clone()
+        }
+    })
 }
 
 enum Outcome {
