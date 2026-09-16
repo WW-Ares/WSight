@@ -288,13 +288,22 @@ function updateText(s: UpdateStatus | null, auto: boolean): string {
     case "ready":
       // Three cases, not two: after a restart the digest result is gone, and
       // claiming either way would put a false statement in front of the user.
+      //
+      // "下次启动" rather than "重启": a staged build now goes in on any start,
+      // and the button is only the way to skip the wait. The old wording
+      // described the button instead of the behaviour, which read as "nothing
+      // happens unless you come back here".
       if (s.verified === true) {
-        return `v${s.staged} 已下载并校验通过，重启即可完成更新`;
+        return `v${s.staged} 已下载并校验通过，下次启动自动装好`;
       }
       if (s.verified === false) {
-        return `v${s.staged} 已下载（该版本未提供校验值，仅核对文件大小）`;
+        return `v${s.staged} 已下载（未提供校验值，仅核对文件大小），下次启动自动装好`;
       }
-      return `v${s.staged} 已下载，重启即可完成更新`;
+      return `v${s.staged} 已下载，下次启动自动装好`;
+    case "ignored":
+      // Naming the version is the point: it is what confirms the click landed,
+      // and the 恢复提示 button beside it is the only way back.
+      return `v${s.latest} 已忽略，不再提示`;
     case "error":
       return s.error;
     default:
@@ -547,8 +556,23 @@ export function SettingsPanel({ initial }: { initial: AppConfig }) {
       .then(() => api.updateStatus())
       .then(setUpd)
       .catch((e: unknown) =>
-        setStatus({ kind: "err", text: `取消失败：${String(e)}` }),
+        setStatus({ kind: "err", text: `忽略失败：${String(e)}` }),
       );
+  };
+
+  // Undoing the ignore and looking again are one gesture: 恢复提示 that left the
+  // page sitting on "已忽略" would look like it had not worked, and the user
+  // wants the release back in front of them, not merely un-forgotten.
+  const unignoreNow = () => {
+    setUpdBusy(true);
+    api
+      .unignoreUpdate()
+      .then(() => api.checkUpdate(true))
+      .then(setUpd)
+      .catch((e: unknown) =>
+        setStatus({ kind: "err", text: `恢复提示失败：${String(e)}` }),
+      )
+      .finally(() => setUpdBusy(false));
   };
 
   // ------------------------------------------------------- auto save
@@ -1259,6 +1283,16 @@ export function SettingsPanel({ initial }: { initial: AppConfig }) {
               {updState === "ready" ? (
                 <button type="button" className="st-link" onClick={discardNow}>
                   忽略这个版本
+                </button>
+              ) : null}
+              {updState === "ignored" ? (
+                <button
+                  type="button"
+                  className="st-link"
+                  disabled={updBusy}
+                  onClick={unignoreNow}
+                >
+                  恢复提示
                 </button>
               ) : null}
             </div>

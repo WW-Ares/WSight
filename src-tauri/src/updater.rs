@@ -191,6 +191,29 @@ pub fn restore_staged(version: &str) {
     }
 }
 
+/// Seed `ignored` from the config at start-up.
+///
+/// The decision is persisted, so the settings window has to remember it across
+/// a restart: without this the page would rest at "启动后自动检查" while the
+/// config still held an ignored version, and the obvious reading of that is
+/// that the ignore was lost. The first check corrects the label either way -
+/// if something newer has been published, the ignored version no longer
+/// matches and the release is offered normally.
+pub fn restore_ignored(version: &str) {
+    if version.is_empty() {
+        return;
+    }
+    with_status(|s| {
+        // A staged build outranks this: it is newer than the ignored version
+        // (that is why it was downloaded at all) and it has an action attached
+        // to it, which "已忽略" does not.
+        if s.state != "downloading" && s.staged.is_empty() {
+            s.latest = version.to_string();
+            s.state = "ignored".to_string();
+        }
+    });
+}
+
 /// True when a verified build is sitting on disk waiting to be installed.
 ///
 /// The launch path asks this before any window exists, so it has to stay a
@@ -223,15 +246,52 @@ pub fn discard(app: &AppHandle) -> Result<(), String> {
     if staged.exists() {
         std::fs::remove_file(&staged).map_err(|e| format!("无法删除更新包: {e}"))?;
     }
-    touch_config(app, |cfg| cfg.update_staged_version.clear());
+    // Which version is being turned down? The one the prompt was about.
+    let wanted = with_status(|s| {
+        if s.staged.is_empty() {
+            s.latest.clone()
+        } else {
+            s.staged.clone()
+        }
+    });
+
+    touch_config(app, |cfg| {
+        cfg.update_staged_version.clear();
+        // Empty is a legitimate value and means "nothing is ignored", so this
+        // needs no branch. What it must not be is *missing*: deleting the file
+        // alone was the old behaviour, and the next check simply fetched the
+        // same release again - six hours later, or the moment 检查更新 was
+        // pressed, and then launch-time install would put it in place anyway.
+        cfg.update_ignored_version = wanted;
+    });
+
     with_status(|s| {
-        s.state = "idle".to_string();
-        s.latest.clear();
         s.notes.clear();
         s.staged.clear();
         s.progress = 0.0;
         s.verified = None;
         s.error.clear();
+        // `latest` is deliberately kept: "v0.5.2 已忽略" is the only proof the
+        // click landed and the only place the decision can be unmade. With no
+        // version to name there is nothing to say, so the page goes back to
+        // resting instead of claiming an ignore that never happened.
+        s.state = if s.latest.is_empty() { "idle" } else { "ignored" }.to_string();
+    });
+    Ok(())
+}
+
+/// Undo 忽略这个版本.
+///
+/// Only forgets: looking again is the caller's next move - the settings window
+/// presses 检查更新 straight afterwards - so this stays a state edit with no
+/// network in it, and cannot fail on a flaky connection.
+pub fn unignore(app: &AppHandle) -> Result<(), String> {
+    touch_config(app, |cfg| cfg.update_ignored_version.clear());
+    with_status(|s| {
+        if s.state == "ignored" {
+            s.state = "idle".to_string();
+            s.latest.clear();
+        }
     });
     Ok(())
 }
@@ -275,6 +335,25 @@ fn is_newer(candidate: &str, current: &str) -> bool {
         }
         _ => false,
     }
+}
+
+/// Is this release one the user asked us to stop offering?
+///
+/// "Ignored" is a statement about one version, not about updates in general, so
+/// anything newer clears the objection on its own - no bookkeeping, and no way
+/// to end up permanently cut off by a click made months ago.
+///
+/// Both sides have to be readable versions. `is_newer` answers `false` for two
+/// tags it cannot parse, and negating that would read as "this release is
+/// ignored" - the one answer that *hides* a release from the user. So an
+/// unreadable value on either side means "not ignored", which fails towards
+/// offering something they turned down rather than towards silence. `sanitize`
+/// already drops an unparseable `ignored`; this is the second line of defence.
+fn is_ignored(release: &str, ignored: &str) -> bool {
+    if ignored.is_empty() || parse_version(release).is_none() || parse_version(ignored).is_none() {
+        return false;
+    }
+    !is_newer(release, ignored)
 }
 
 // ------------------------------------------------------------------- paths
@@ -601,6 +680,13 @@ pub async fn check(app: AppHandle, manual: bool) {
                 }
             )
         }
+        Ok(Outcome::Ignored { version }) => {
+            s.state = "ignored".to_string();
+            s.latest = version.clone();
+            s.staged.clear();
+            s.notes.clear();
+            format!("ignored {version} (skipped by request)")
+        }
         Ok(Outcome::Available { version }) => {
             s.state = "available".to_string();
             s.latest = version.clone();
@@ -643,6 +729,8 @@ fn staged_or_dash() -> String {
 
 enum Outcome {
     UpToDate,
+    /// The release on offer is the one the user told us to stop offering.
+    Ignored { version: String },
     Available { version: String },
     /// `verified` is `None` when the build on disk had already been staged
     /// before this check ran: the digest result died with the process that
@@ -670,6 +758,15 @@ async fn run_check(app: &AppHandle, manual: bool) -> Result<Outcome, String> {
         return Ok(Outcome::Ready {
             version: staged,
             verified: None,
+        });
+    }
+
+    // 忽略这个版本 is remembered, not merely acted on once. Deliberately after
+    // the `staged` check above: a build already on disk is there because the
+    // user did *not* ignore it, and it keeps its prompt.
+    if is_ignored(&release.version, &read_config(app).update_ignored_version) {
+        return Ok(Outcome::Ignored {
+            version: release.version,
         });
     }
 
@@ -909,6 +1006,25 @@ mod tests {
         // A tag we cannot read is never an upgrade.
         assert!(!is_newer("latest", "0.5.0"));
         assert!(!is_newer("0.5.0", "latest"));
+    }
+
+    #[test]
+    fn an_ignored_release_stays_ignored_but_only_its_own_version() {
+        // The bug this guards: 忽略这个版本 used to delete the file and forget
+        // the decision, so the next check offered the same release again.
+        assert!(is_ignored("0.5.2", "0.5.2"));
+        // A newer release supersedes the objection by itself - otherwise one
+        // click would cut the user off from every future update.
+        assert!(!is_ignored("0.5.3", "0.5.2"));
+        assert!(!is_ignored("1.0.0", "0.5.2"));
+        // Nothing ignored: nothing is skipped.
+        assert!(!is_ignored("0.5.2", ""));
+        // A release *older* than the ignored one was already superseded, and
+        // re-offering it would be the same mistake in the other direction.
+        assert!(is_ignored("0.5.1", "0.5.2"));
+        // Unreadable on either side: never hide a release.
+        assert!(!is_ignored("latest", "0.5.2"));
+        assert!(!is_ignored("0.5.2", "latest"));
     }
 
     #[test]

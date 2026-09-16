@@ -173,6 +173,16 @@ pub struct AppConfig {
     /// staged update has to survive the app being closed and reopened, or the
     /// "已就绪" prompt would vanish along with the process that earned it.
     pub update_staged_version: String,
+    /// The version the user told the updater to stop offering.
+    ///
+    /// Without this, 忽略这个版本 only deleted the downloaded file: the next
+    /// check - six hours later, or the moment 检查更新 is pressed - found the
+    /// same release and downloaded it again, and with launch-time installs it
+    /// would then be in place by the following start. "Ignore" has to survive
+    /// the thing it is ignoring, so the version is written down instead.
+    /// Cleared when the user undoes it; a *newer* release simply supersedes it
+    /// and needs no bookkeeping.
+    pub update_ignored_version: String,
 }
 
 impl Default for AppConfig {
@@ -226,6 +236,7 @@ impl Default for AppConfig {
             update_auto: true,
             update_last_check: 0,
             update_staged_version: String::new(),
+            update_ignored_version: String::new(),
         }
     }
 }
@@ -405,6 +416,15 @@ pub fn sanitize(cfg: &mut AppConfig) {
     cfg.update_staged_version = cfg.update_staged_version.trim().to_string();
     if !cfg.update_staged_version.is_empty() && !is_version_like(&cfg.update_staged_version) {
         cfg.update_staged_version.clear();
+    }
+
+    // Same treatment for the ignored version, and for a sharper reason: an
+    // unparseable value would compare against nothing and never match, so the
+    // release would be offered again - the ignore would look forgotten, which
+    // is precisely the bug this field exists to fix.
+    cfg.update_ignored_version = cfg.update_ignored_version.trim().to_string();
+    if !cfg.update_ignored_version.is_empty() && !is_version_like(&cfg.update_ignored_version) {
+        cfg.update_ignored_version.clear();
     }
 }
 

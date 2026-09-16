@@ -401,6 +401,13 @@ export interface AppConfig {
    */
   updateStagedVersion: string;
   /**
+   * Version the user pressed 忽略这个版本 on. The updater stops offering it
+   * until something newer is published. Backend-owned: the settings form must
+   * carry it over rather than save its own copy, or an open window would
+   * forget the decision on its next auto-save.
+   */
+  updateIgnoredVersion: string;
+  /**
    * Diagnostic: puts the real rendering fps and the observed snapshot
    * interval into the monitor window's title. Flip `debugFps` in config.json
    * by hand; deliberately absent from the settings UI.
@@ -412,7 +419,12 @@ export interface AppConfig {
  * What the updater knows right now, as `update_status` reports it.
  *
  * `state` is the whole state machine: `idle` -> `checking` -> `uptodate` |
- * `available` | `error`, and `downloading` -> `ready` when a build is staged.
+ * `available` | `ignored` | `error`, and `downloading` -> `ready` when a build
+ * is staged.
+ *
+ * `ignored` is a resting state, not a failure: it means the release on offer is
+ * the one the user turned down, and it stays until something newer is
+ * published or 恢复提示 is pressed.
  */
 export interface UpdateStatus {
   state:
@@ -422,6 +434,7 @@ export interface UpdateStatus {
     | "available"
     | "downloading"
     | "ready"
+    | "ignored"
     | "error";
   /** the version this build is */
   current: string;
@@ -548,6 +561,7 @@ export const DEFAULT_CONFIG: AppConfig = {
   updateAuto: true,
   updateLastCheck: 0,
   updateStagedVersion: "",
+  updateIgnoredVersion: "",
 
   debugFps: false,
 };

@@ -113,8 +113,13 @@ export const api = {
    * this resolves, so the promise only ever settles on failure.
    */
   applyUpdate: () => invoke<void>("apply_update"),
-  /** delete a staged build the user does not want */
+  /**
+   * Turn down a staged build. The version is remembered, so the next check
+   * will not offer it again - `unignoreUpdate` is how that is taken back.
+   */
   discardUpdate: () => invoke<void>("discard_update"),
+  /** forget an ignored version, so it may be offered again */
+  unignoreUpdate: () => invoke<void>("unignore_update"),
 };
 
 export function onSnapshot(cb: (s: Snapshot) => void): Promise<UnlistenFn> {

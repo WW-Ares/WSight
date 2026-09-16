@@ -6,6 +6,12 @@ src-tauri/gen/
 *.exe
 *.msi
 *.nsis.zip
+# The self-updater works beside the exe, and neither name ends in .exe, so
+# neither is covered above: `WSight.exe.new` is a downloaded build waiting for
+# a restart, `WSight.exe.download` is one still arriving. They live in the
+# program directory, which for a dev checkout is the repository root.
+*.exe.new
+*.exe.download
 
 # --- local environment (mirrors, sandbox tweaks - not part of the source) ---
 .npmrc

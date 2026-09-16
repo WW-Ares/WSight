@@ -673,15 +673,18 @@ fn save_config(
         guard.clone()
     };
 
-    // Two keys in this struct belong to the backend, not to the settings form:
-    // the updater writes them and no control edits them. The settings window
-    // keeps a whole config in its draft and auto-saves it 450ms after any edit,
-    // so a window left open across a background check would write its stale
-    // copy back and wipe the record of a downloaded update - taking the
-    // "重启更新" prompt with it, while the file sits on disk orphaned. Carry
-    // them over instead of trusting the form with them.
+    // Three keys in this struct belong to the backend, not to the settings
+    // form: the updater writes them and no control edits them. The settings
+    // window keeps a whole config in its draft and auto-saves it 450ms after
+    // any edit, so a window left open across a background check would write
+    // its stale copy back and wipe the record of a downloaded update - taking
+    // the "重启更新" prompt with it, while the file sits on disk orphaned. The
+    // same draft would just as quietly forget an ignored version, and the
+    // release the user turned down would come straight back. Carry them over
+    // instead of trusting the form with them.
     next.update_last_check = previous.update_last_check;
     next.update_staged_version = previous.update_staged_version;
+    next.update_ignored_version = previous.update_ignored_version;
 
     let weather_touched = previous.qweather_key != next.qweather_key
         || previous.qweather_host != next.qweather_host
@@ -1067,10 +1070,17 @@ fn apply_update(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// Forget a staged update: delete the file and clear the config key.
+/// Turn down an update: delete the staged file and remember the version, so the
+/// next check does not offer it again.
 #[tauri::command]
 fn discard_update(app: AppHandle) -> Result<(), String> {
     updater::discard(&app)
+}
+
+/// Undo 忽略这个版本. The frontend follows up with a check of its own.
+#[tauri::command]
+fn unignore_update(app: AppHandle) -> Result<(), String> {
+    updater::unignore(&app)
 }
 
 /// Open a URL in whatever the user has registered as their browser.
@@ -1367,6 +1377,7 @@ pub fn run() {
             check_update,
             apply_update,
             discard_update,
+            unignore_update,
             quit_app
         ])
         .on_window_event(|window, event| {
@@ -1440,6 +1451,10 @@ pub fn run() {
             // An update downloaded before the last restart is still sitting
             // beside the exe, and the settings window has to go on offering it.
             updater::restore_staged(&cfg.update_staged_version);
+            // Same reasoning for the version the user turned down: it has to
+            // still be written on the page after a restart, or the ignore looks
+            // like it was forgotten.
+            updater::restore_ignored(&cfg.update_ignored_version);
             updater::start(handle);
             Ok(())
         })

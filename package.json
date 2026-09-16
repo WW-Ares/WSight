@@ -1,7 +1,7 @@
 {
   "name": "wsight",
   "private": true,
-  "version": "0.5.1",
+  "version": "0.5.2",
   "type": "module",
   "description": "WSight - lightweight desktop widgets: hardware monitor panel + QWeather panel",
   "scripts": {
