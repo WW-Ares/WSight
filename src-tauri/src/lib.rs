@@ -639,6 +639,16 @@ fn save_config(
         guard.clone()
     };
 
+    // Two keys in this struct belong to the backend, not to the settings form:
+    // the updater writes them and no control edits them. The settings window
+    // keeps a whole config in its draft and auto-saves it 450ms after any edit,
+    // so a window left open across a background check would write its stale
+    // copy back and wipe the record of a downloaded update - taking the
+    // "重启更新" prompt with it, while the file sits on disk orphaned. Carry
+    // them over instead of trusting the form with them.
+    next.update_last_check = previous.update_last_check;
+    next.update_staged_version = previous.update_staged_version;
+
     let weather_touched = previous.qweather_key != next.qweather_key
         || previous.qweather_host != next.qweather_host
         || previous.location_id != next.location_id
