@@ -19,6 +19,8 @@
 
 use std::collections::HashMap;
 use std::ffi::c_void;
+use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_READ};
+use winreg::RegKey;
 
 // --------------------------------------------------------------- CPU clock
 
@@ -27,6 +29,14 @@ struct PdhFmtCounterValue {
     status: u32,
     _pad: u32,
     value: f64,
+}
+
+/// One row of a PDH counter array. The instance name lives in a buffer that
+/// follows the array itself, so `name` points into that same allocation.
+#[repr(C)]
+struct PdhFmtCounterValueItemW {
+    name: *const u16,
+    value: PdhFmtCounterValue,
 }
 
 #[link(name = "pdh")]
@@ -45,12 +55,21 @@ extern "system" {
         kind: *mut u32,
         value: *mut PdhFmtCounterValue,
     ) -> u32;
+    fn PdhGetFormattedCounterArrayW(
+        counter: isize,
+        format: u32,
+        buffer_size: *mut u32,
+        item_count: *mut u32,
+        buffer: *mut PdhFmtCounterValueItemW,
+    ) -> u32;
     fn PdhCloseQuery(query: isize) -> u32;
 }
 
 const PDH_FMT_DOUBLE: u32 = 0x0000_0200;
 const PDH_CSTATUS_VALID_DATA: u32 = 0x0000_0000;
 const PDH_CSTATUS_NEW_DATA: u32 = 0x0000_0001;
+/// "The buffer was too small" - the documented way to ask for the size.
+const PDH_MORE_DATA: u32 = 0x8000_07D2;
 
 /// The English path is required: `PdhAddCounterW` would resolve the localised
 /// names, and this panel runs on a Chinese Windows where they differ.
@@ -128,6 +147,152 @@ impl Drop for CpuClock {
         // SAFETY: `query` is the live handle from `PdhOpenQueryW`.
         unsafe {
             PdhCloseQuery(self.query);
+        }
+    }
+}
+
+// -------------------------------------------------------------- GPU load
+
+/// Every GPU engine of every process, as one counter.
+///
+/// The `*` is a wildcard: Windows publishes one instance per (process, engine)
+/// pair - `pid_1234_luid_0x0_0x…_phys_0_eng_0_engtype_3D` - so the value has
+/// to be read as an array and aggregated by hand.
+const GPU_COUNTER: &str = r"\GPU Engine(*)\Utilization Percentage";
+
+/// A live PDH query on GPU engine utilisation.
+///
+/// This is what makes the GPU column honest on AMD and Intel machines. NVML
+/// only speaks to NVIDIA; the registry knows those cards' names and their
+/// memory but not their load, so without this the ring would sit at `--`
+/// forever on a perfectly working Radeon. Task Manager reads the same counters.
+///
+/// Counters can be switched off by policy, and a machine with no 3D engine
+/// reports no instances at all, so every method here is allowed to return
+/// `None` - the caller renders "unknown", never a made-up zero.
+pub struct GpuLoad {
+    query: isize,
+    counter: isize,
+}
+
+impl GpuLoad {
+    pub fn new() -> Option<Self> {
+        let path: Vec<u16> = GPU_COUNTER
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+
+        // SAFETY: `path` is NUL terminated and outlives the call; the two
+        // out-parameters are valid, initialised locals.
+        unsafe {
+            let mut query: isize = 0;
+            if PdhOpenQueryW(std::ptr::null(), 0, &mut query) != 0 {
+                return None;
+            }
+            let mut counter: isize = 0;
+            if PdhAddEnglishCounterW(query, path.as_ptr(), 0, &mut counter) != 0 {
+                PdhCloseQuery(query);
+                return None;
+            }
+            // Prime it: the first collect yields no comparable values.
+            PdhCollectQueryData(query);
+            Some(Self { query, counter })
+        }
+    }
+
+    /// Utilisation of the busiest engine, 0..100.
+    ///
+    /// Summing per engine type and taking the maximum is what Task Manager's
+    /// GPU graph shows. Summing *across* engines would routinely exceed 100%
+    /// - a game using 3D and Copy at once reports both - and reporting one
+    /// arbitrary instance would show whichever process happened to be first.
+    pub fn percent(&self) -> Option<f32> {
+        // SAFETY: handles come from a live query owned by `self`. The array
+        // buffer is over-allocated as `u64` words so the cast to a struct
+        // holding a pointer is correctly aligned; PDH writes only `size`
+        // bytes and reports `count` entries, both of which are honoured.
+        unsafe {
+            if PdhCollectQueryData(self.query) != 0 {
+                return None;
+            }
+            let mut size: u32 = 0;
+            let mut count: u32 = 0;
+            let probe = PdhGetFormattedCounterArrayW(
+                self.counter,
+                PDH_FMT_DOUBLE,
+                &mut size,
+                &mut count,
+                std::ptr::null_mut(),
+            );
+            // An idle GPU with nothing submitted legitimately has no
+            // instances, which comes back as something other than MORE_DATA.
+            if probe != PDH_MORE_DATA || size == 0 || count == 0 {
+                return None;
+            }
+
+            let mut words = vec![0u64; size as usize / 8 + 1];
+            let items = words.as_mut_ptr() as *mut PdhFmtCounterValueItemW;
+            if PdhGetFormattedCounterArrayW(
+                self.counter,
+                PDH_FMT_DOUBLE,
+                &mut size,
+                &mut count,
+                items,
+            ) != 0
+            {
+                return None;
+            }
+
+            let mut by_engine: HashMap<String, f64> = HashMap::new();
+            for item in std::slice::from_raw_parts(items, count as usize) {
+                let status = item.value.status;
+                if status != PDH_CSTATUS_VALID_DATA && status != PDH_CSTATUS_NEW_DATA {
+                    continue;
+                }
+                let value = item.value.value;
+                if !value.is_finite() || value <= 0.0 {
+                    continue;
+                }
+                *by_engine.entry(engine_of(item.name)).or_insert(0.0) += value;
+            }
+
+            let busiest = by_engine.values().copied().fold(0.0f64, f64::max);
+            if by_engine.is_empty() {
+                // Instances existed but every one was idle.
+                return Some(0.0);
+            }
+            Some(busiest.clamp(0.0, 100.0) as f32)
+        }
+    }
+}
+
+impl Drop for GpuLoad {
+    fn drop(&mut self) {
+        // SAFETY: `query` is the live handle from `PdhOpenQueryW`.
+        unsafe {
+            PdhCloseQuery(self.query);
+        }
+    }
+}
+
+/// `…_engtype_3D` -> `3D`; anything unrecognised groups under `other` so its
+/// values still count towards some engine rather than being dropped.
+fn engine_of(instance: *const u16) -> String {
+    if instance.is_null() {
+        return "other".to_string();
+    }
+    // The buffer is NUL terminated by PDH, and lives as long as the array.
+    let mut len = 0usize;
+    // SAFETY: walking a NUL-terminated UTF-16 buffer owned by the caller's
+    // array, which is alive for the duration of this call.
+    unsafe {
+        while *instance.add(len) != 0 {
+            len += 1;
+        }
+        let name = String::from_utf16_lossy(std::slice::from_raw_parts(instance, len));
+        match name.split_once("engtype_") {
+            Some((_, rest)) => rest.split('_').next().unwrap_or("other").to_string(),
+            None => "other".to_string(),
         }
     }
 }
@@ -380,6 +545,167 @@ pub fn motherboard() -> String {
     String::new()
 }
 
+// ------------------------------------------------------- display adapters
+
+/// Where Windows keeps the driver state of every display adapter. Each one
+/// installed gets a four-digit subkey plus the subkeys belonging to the class
+/// itself (`Properties`, `Configuration`).
+const DISPLAY_CLASS: &str =
+    r"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}";
+
+/// Name fragments that mean "this is not a graphics card".
+///
+/// The `PCI\` test below catches the indirect displays - RDP, Sunlogin,
+/// GameViewer all register under `Root\` or as `RdpIdd_*`. It does *not* catch
+/// the emulated ones: VMware SVGA, VirtualBox, QXL and VirtIO are genuine PCI
+/// devices and would win the ranking on a virtual machine. Hence both tests.
+const VIRTUAL_HINTS: &[&str] = &[
+    "virtual",
+    "indirect",
+    "idd",
+    "remote display",
+    "basic display",
+    "basic render",
+    "hyper-v",
+    "vmware",
+    "virtualbox",
+    "qxl",
+    "virtio",
+    "svga",
+    "mirror",
+    "vga graphics adapter",
+    "display only",
+    "splashtop",
+    "parsec",
+    "todesk",
+    "oray",
+    "sunlogin",
+    "anydesk",
+    "rustdesk",
+    "gameviewer",
+    "citrix",
+    "meta virtual",
+    "usb mobile monitor",
+    "astral",
+    "dameware",
+    "windows virtual display",
+    "amazon vdi",
+    "ngfx",
+];
+
+/// A display adapter, as Windows itself describes it.
+pub struct DisplayAdapter {
+    /// `NVIDIA GeForce RTX 2080 Ti` - the driver's own string, which is also
+    /// what the caption rules in `src/monitor/hwName.ts` are written against.
+    pub name: String,
+    /// Bytes of VRAM, 0 when the driver does not publish it.
+    pub vram_bytes: u64,
+}
+
+fn decode_int(bytes: &[u8]) -> u64 {
+    match bytes.len() {
+        8 => u64::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]]),
+        4 => u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as u64,
+        _ => 0,
+    }
+}
+
+/// VRAM in bytes, plus whether it came from the trustworthy 64-bit value.
+///
+/// `HardwareInformation.qwMemorySize` is a `REG_QWORD` and matches NVML to the
+/// byte on this machine (11.0 GiB for an RTX 2080 Ti). Intel instead publishes
+/// the 32-bit `HardwareInformation.MemorySize`, whose value is a fixed claim
+/// rather than a measurement - an integrated GPU reports 4 GB of shared memory
+/// no matter what the driver actually hands out. That is why the two are not
+/// simply maxed: the flag lets the ranking prefer a card that states its memory
+/// properly over one that guesses.
+fn vram_from(key: &RegKey) -> (u64, bool) {
+    if let Ok(v) = key.get_raw_value("HardwareInformation.qwMemorySize") {
+        let n = decode_int(&v.bytes);
+        if n > 0 {
+            return (n, true);
+        }
+    }
+    if let Ok(v) = key.get_raw_value("HardwareInformation.MemorySize") {
+        let n = decode_int(&v.bytes);
+        if n > 0 {
+            return (n, false);
+        }
+    }
+    (0, false)
+}
+
+fn is_virtual_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    VIRTUAL_HINTS.iter().any(|hint| lower.contains(hint))
+}
+
+/// Real graphics adapters on this machine, best first.
+///
+/// This exists because NVML only speaks to NVIDIA cards. Before it, every AMD
+/// and Intel user saw an empty GPU column - and the column is only blank *if
+/// the driver is missing*, which is not what a monitor should say about a
+/// working machine. The registry knows the name and the memory for everyone;
+/// it supplies neither usage nor temperature, and those the caller reports as
+/// unavailable rather than as zero (see `collector.rs`).
+pub fn display_adapters() -> Vec<DisplayAdapter> {
+    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+    let Ok(class) = hklm.open_subkey_with_flags(DISPLAY_CLASS, KEY_READ) else {
+        return Vec::new();
+    };
+
+    let mut ranked: Vec<(f64, DisplayAdapter)> = Vec::new();
+    for slot in class.enum_keys().flatten() {
+        if slot.len() != 4 || !slot.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        let Ok(key) = class.open_subkey_with_flags(&slot, KEY_READ) else {
+            continue;
+        };
+        let name: String = key.get_value("DriverDesc").unwrap_or_default();
+        let device_id: String = key.get_value("MatchingDeviceId").unwrap_or_default();
+        if name.is_empty() {
+            continue;
+        }
+        let device_id = device_id.to_ascii_lowercase();
+        // A real card reaches us over PCI. Nothing indirect does.
+        if !device_id.starts_with("pci\\") {
+            continue;
+        }
+        if is_virtual_name(&name) {
+            continue;
+        }
+        let vendor = device_id
+            .split_once("ven_")
+            .map(|(_, rest)| rest.chars().take(4).collect::<String>())
+            .unwrap_or_default();
+        let (vram, dedicated) = vram_from(&key);
+        // Vendor alone must not outrank memory - an 8 GB Arc is the GPU an
+        // Intel user wants named, not the 1 GB iGPU beside it. So the vendor
+        // term is only a tie-breaker, and stating the memory properly is worth
+        // more than claiming a large number.
+        let vendor_bias = match vendor.as_str() {
+            "10de" => 3.0,
+            "1002" | "1022" => 2.0,
+            "8086" => 1.0,
+            _ => 0.0,
+        };
+        let score = (if dedicated { 16.0 } else { 0.0 })
+            + vram as f64 / 1024f64.powi(3)
+            + vendor_bias / 100.0;
+        ranked.push((
+            score,
+            DisplayAdapter {
+                name,
+                vram_bytes: vram,
+            },
+        ));
+    }
+
+    ranked.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    ranked.into_iter().map(|(_, a)| a).collect()
+}
+
 // -------------------------------------------------------------- adapters
 
 #[repr(C)]
@@ -570,7 +896,7 @@ extern "system" {
         returned: *mut u32,
         overlapped: *mut c_void,
     ) -> i32;
-    fn CloseHandle(handle: isize) -> i32;
+    fn CloseHandle(handle: *mut c_void) -> i32;
 }
 
 const FILE_SHARE_READ: u32 = 0x0000_0001;
@@ -624,7 +950,7 @@ pub fn device_number(mount_point: &str) -> Option<u32> {
             &mut returned,
             std::ptr::null_mut(),
         );
-        CloseHandle(handle);
+        CloseHandle(handle as *mut c_void);
         if ok == 0 || returned < 12 {
             return None;
         }

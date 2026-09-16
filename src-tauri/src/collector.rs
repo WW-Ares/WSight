@@ -197,6 +197,15 @@ pub struct Collector {
     mem_stick_mb: u64,
     mem_vendor: String,
     mem_part_no: String,
+    /// The display adapter to name when NVML has nothing to say. Read once:
+    /// which card is in the machine does not change while it is running, and
+    /// enumerating the registry every second to answer the same question
+    /// would be pure waste.
+    gpu_adapter: Option<native::DisplayAdapter>,
+    /// Performance-counter query for GPU utilisation, used exactly when
+    /// `gpu_adapter` is the one doing the reporting - NVML is more precise and
+    /// carries the temperature too.
+    gpu_load: Option<native::GpuLoad>,
     /// Cached process count, refreshed on its own slower beat.
     proc_count: u32,
     proc_refreshed: Option<Instant>,
@@ -356,11 +365,27 @@ impl Collector {
         );
         let proc_count = sys.processes().len() as u32;
 
+        // The registry fallback is only worth setting up when NVML is absent -
+        // on an NVIDIA machine it would never be consulted, and the PDH query
+        // is a wildcard array read, the most expensive single counter here.
+        let nvml = Nvml::init().ok();
+        let wants_fallback = nvml.is_none();
+        let gpu_adapter = if wants_fallback {
+            native::display_adapters().into_iter().next()
+        } else {
+            None
+        };
+        let gpu_load = if wants_fallback {
+            native::GpuLoad::new()
+        } else {
+            None
+        };
+
         Self {
             sys,
             networks,
             disks,
-            nvml: Nvml::init().ok(),
+            nvml,
             cpu_brand: brand,
             cpu_rated_mhz: rated,
             clock: native::CpuClock::new(),
@@ -373,12 +398,25 @@ impl Collector {
             mem_stick_mb: stick_mb,
             mem_vendor: vendor,
             mem_part_no: part_no,
+            gpu_adapter,
+            gpu_load,
             proc_count,
             proc_refreshed: Some(Instant::now()),
         }
     }
 
+    /// GPU figures, from the best source this machine has.
+    ///
+    /// NVML speaks only to NVIDIA, but it is also the only thing that reports
+    /// temperature, fan, power and the two clocks - so it wins whenever it is
+    /// there. Everywhere else the registry supplies the name and the memory,
+    /// and the performance counters supply the load. That is the difference
+    /// between an AMD user seeing their card and seeing an empty column.
     fn sample_gpu(&self) -> Option<GpuInfo> {
+        self.sample_gpu_nvml().or_else(|| self.sample_gpu_fallback())
+    }
+
+    fn sample_gpu_nvml(&self) -> Option<GpuInfo> {
         let nvml = self.nvml.as_ref()?;
         let device = nvml.device_by_index(0).ok()?;
 
@@ -437,6 +475,36 @@ impl Collector {
             power_w,
             core_clock_mhz,
             mem_clock_mhz,
+        })
+    }
+
+    /// What we can say without NVML: which card it is, how much memory it has,
+    /// and - through the performance counters - how busy it is.
+    ///
+    /// Everything else is reported as *unknown*, not as zero. `load = -1` is
+    /// what makes the panel draw the ring as "no reading" instead of as a
+    /// confident 0%, and 0 MHz is the same statement for the clocks. A monitor
+    /// that invents numbers is worse than one that admits a gap.
+    fn sample_gpu_fallback(&self) -> Option<GpuInfo> {
+        let adapter = self.gpu_adapter.as_ref()?;
+        let load = self
+            .gpu_load
+            .as_ref()
+            .and_then(|counter| counter.percent())
+            .unwrap_or(-1.0);
+        Some(GpuInfo {
+            name: adapter.name.clone(),
+            load,
+            mem_total: adapter.vram_bytes,
+            // The counters describe utilisation, not the allocator; there is
+            // no counterpart to `memory_info()` here. The panel prints the
+            // total alone when this is unknown.
+            mem_used: 0,
+            temp_c: None,
+            fan_percent: -1.0,
+            power_w: None,
+            core_clock_mhz: 0,
+            mem_clock_mhz: 0,
         })
     }
 

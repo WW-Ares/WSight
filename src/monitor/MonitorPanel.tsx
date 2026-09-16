@@ -15,6 +15,7 @@ import {
   rateColor,
 } from "../shared/format";
 import { Ellipsis } from "../shared/Ellipsis";
+import { FitText } from "../shared/FitText";
 import { Ring } from "./components/Ring";
 import { snapshotFromCache } from "./monitorCache";
 import {
@@ -335,8 +336,19 @@ export function MonitorPanel({ config }: { config: AppConfig }) {
   const cpu = snap?.cpu;
   const mem = snap?.mem;
   const gpu = snap?.gpu;
+
+  // A GPU with a name but no live figures: the registry knows what the card is
+  // and how much VRAM it has, but only NVML reports how much of it is in use.
+  // `load < 0` and `memUsed == 0` are both "not measured" - neither is a
+  // reading, so everything derived from them has to go quiet rather than draw a
+  // confident 0%.
+  const gpuLive = !!gpu && gpu.load >= 0;
   const gpuMem =
-    gpu && gpu.memTotal > 0 ? formatGbPair(gpu.memUsed, gpu.memTotal) : "--";
+    !gpu || gpu.memTotal <= 0
+      ? "--"
+      : gpu.memUsed > 0
+        ? formatGbPair(gpu.memUsed, gpu.memTotal)
+        : `--/${formatGb(gpu.memTotal)}`;
 
   // The caption of each column, and - for the network - the label above it.
   // The other three columns put a measurement on their first line and let the
@@ -397,7 +409,7 @@ export function MonitorPanel({ config }: { config: AppConfig }) {
                     className="mon-col-l1"
                     text={cpu ? formatClock(cpu.freqLiveMhz, cpu.freqMhz) : "--"}
                   />
-                  {showL2 ? <Ellipsis className="mon-col-l2" text={l2Cpu} /> : null}
+                  {showL2 ? <FitText className="mon-col-l2" text={l2Cpu} /> : null}
                 </div>
 
                 <div className="mon-col">
@@ -416,7 +428,15 @@ export function MonitorPanel({ config }: { config: AppConfig }) {
                     className="mon-col-l1"
                     text={mem ? formatGbPair(mem.used, mem.total) : "--"}
                   />
-                  {showL2 ? <Ellipsis className="mon-col-l2" text={l2Mem} /> : null}
+                  {showL2 ? (
+                    // The caption is `金士顿 D4 3200` whenever the part number
+                    // does not fit; the number itself is still reachable here.
+                    <FitText
+                      className="mon-col-l2"
+                      text={l2Mem}
+                      hint={mem?.partNo}
+                    />
+                  ) : null}
                 </div>
 
                 {showGpu ? (
@@ -426,14 +446,14 @@ export function MonitorPanel({ config }: { config: AppConfig }) {
                     </span>
                     <div className="mon-col-slot">
                     <Ring
-                      value={gpu?.load ?? 0}
+                      value={gpuLive ? (gpu?.load ?? 0) : 0}
                       color="var(--accent-gpu)"
                       ramp={ringRamp}
-                      pending={pending}
+                      pending={pending || !gpuLive}
                     />
                     </div>
                     <Ellipsis className="mon-col-l1" text={gpuMem} />
-                    {showL2 ? <Ellipsis className="mon-col-l2" text={l2Gpu} /> : null}
+                    {showL2 ? <FitText className="mon-col-l2" text={l2Gpu} /> : null}
                   </div>
                 ) : null}
 
@@ -466,7 +486,7 @@ export function MonitorPanel({ config }: { config: AppConfig }) {
                         <span className="mon-col-l1 net-total-label">
                           {netLabel}
                         </span>
-                        <Ellipsis className="mon-col-l2" text={l2Net} />
+                        <FitText className="mon-col-l2" text={l2Net} />
                       </>
                     ) : null}
                   </div>

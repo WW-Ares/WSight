@@ -665,3 +665,126 @@ body {
 .st-link:active {
   transform: translateY(1px);
 }
+
+/* ---------------------------------------------------------------- update */
+
+/* One row inside 更新: a status line, an optional progress bar, an optional
+   notes fold and the buttons. Kept in the card body rather than in a Row so
+   the buttons can sit under a sentence instead of beside it - "检查更新" next
+   to a wrapped error message would break the row rhythm. */
+.st-upd {
+  padding: 10px 0 2px;
+  border-top: 1px solid var(--st-line-soft);
+}
+
+.st-upd-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.st-upd-text {
+  flex: 1 1 auto;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--fg-dim);
+  min-width: 0;
+}
+
+.st-upd-cur {
+  flex: 0 0 auto;
+  font-size: 10.5px;
+  font-weight: 500;
+  color: var(--fg-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+/* A dot rather than a coloured sentence: the state is worth a glance, not a
+   paragraph, and colour on text at 11px costs more legibility than it buys. */
+.st-upd-dot {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--fg-faint);
+  transform: translateY(-1px);
+}
+
+.st-upd-dot.ok {
+  background: var(--st-ok);
+}
+
+.st-upd-dot.new {
+  background: var(--st-accent);
+}
+
+.st-upd-dot.err {
+  background: var(--danger);
+}
+
+.st-upd-dot.busy {
+  background: var(--st-accent);
+  animation: st-pulse 1.1s ease-in-out infinite;
+}
+
+@keyframes st-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.25;
+  }
+}
+
+.st-bar {
+  margin: 7px 0 0;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--st-field);
+  overflow: hidden;
+}
+
+.st-bar span {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--st-accent);
+  transition: width 0.25s linear;
+}
+
+.st-upd-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 9px;
+}
+
+/* Release notes are plain text - the release script emits a `- item` list and
+   nothing else - so a <pre> with the body font is exactly right; there is no
+   markdown left to render. */
+.st-upd-notes {
+  margin-top: 8px;
+}
+
+.st-upd-notes summary {
+  font-size: 10.5px;
+  color: var(--fg-faint);
+  cursor: pointer;
+}
+
+.st-upd-notes pre {
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  max-height: 180px;
+  overflow: auto;
+  border: 1px solid var(--st-line);
+  border-radius: 7px;
+  background: var(--st-field-solid);
+  color: var(--fg-dim);
+  font-family: inherit;
+  font-size: 10.5px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}

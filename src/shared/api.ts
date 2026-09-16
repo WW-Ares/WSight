@@ -5,6 +5,7 @@ import type {
   GeoCity,
   MonitorCache,
   Snapshot,
+  UpdateStatus,
   WeatherCache,
   WeatherPayload,
 } from "./types";
@@ -96,6 +97,24 @@ export const api = {
   /** Launch both widgets on login (Windows per-user `Run` entry). */
   setAutostart: (enabled: boolean) => invoke<boolean>("set_autostart", { enabled }),
   getAutostart: () => invoke<boolean>("get_autostart"),
+
+  // ------------------------------------------------------------- updates
+
+  /** what the updater knows right now - cheap enough to poll while downloading */
+  updateStatus: () => invoke<UpdateStatus>("update_status"),
+  /**
+   * Look for a new release. `manual` is the button in the settings window:
+   * it reports failures and downloads even when the automatic switch is off.
+   */
+  checkUpdate: (manual = true) =>
+    invoke<UpdateStatus>("check_update", { manual }),
+  /**
+   * Swap in the staged build and restart. On success the app is gone before
+   * this resolves, so the promise only ever settles on failure.
+   */
+  applyUpdate: () => invoke<void>("apply_update"),
+  /** delete a staged build the user does not want */
+  discardUpdate: () => invoke<void>("discard_update"),
 };
 
 export function onSnapshot(cb: (s: Snapshot) => void): Promise<UnlistenFn> {

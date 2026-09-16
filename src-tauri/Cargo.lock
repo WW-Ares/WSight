@@ -5046,12 +5046,13 @@ dependencies = [
 
 [[package]]
 name = "wsight"
-version = "0.4.5"
+version = "0.5.0"
 dependencies = [
  "nvml-wrapper",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "sha2",
  "sysinfo",
  "tauri",
  "tauri-build",

@@ -154,7 +154,10 @@ export const L2_MEM_OPTIONS = [
   { id: "ddr", name: "类型 + 频率" },
   { id: "speed", name: "DDR 频率" },
   { id: "sticks", name: "插槽 条数 × 单条" },
-  { id: "partno", name: "内存型号" },
+  // Not "内存型号": the caption only shows the part number when it fits, and
+  // falls back to `金士顿 D4 3200` when it does not. The number stays on the
+  // tooltip either way, so the label has to describe both.
+  { id: "partno", name: "内存品牌 · 规格" },
   { id: "board", name: "主板型号" },
 ] as const;
 
@@ -380,11 +383,60 @@ export interface AppConfig {
   /** reserved: start both widgets on login */
   autostart: boolean;
   /**
+   * Look for a new release in the background and download it ready to install.
+   *
+   * Staging the download is all this does - nothing is ever replaced without
+   * the user pressing 重启更新 in the settings window, because swapping the exe
+   * restarts the app and that is not something to do behind someone's back.
+   */
+  updateAuto: boolean;
+  /**
+   * Unix seconds of the last check, so a restart does not re-check inside the
+   * six-hour window. Written by the backend only.
+   */
+  updateLastCheck: number;
+  /**
+   * Version downloaded and waiting for a restart. Survives a relaunch, which
+   * is what keeps the "已就绪" prompt on screen until it is acted on.
+   */
+  updateStagedVersion: string;
+  /**
    * Diagnostic: puts the real rendering fps and the observed snapshot
    * interval into the monitor window's title. Flip `debugFps` in config.json
    * by hand; deliberately absent from the settings UI.
    */
   debugFps: boolean;
+}
+
+/**
+ * What the updater knows right now, as `update_status` reports it.
+ *
+ * `state` is the whole state machine: `idle` -> `checking` -> `uptodate` |
+ * `available` | `error`, and `downloading` -> `ready` when a build is staged.
+ */
+export interface UpdateStatus {
+  state:
+    | "idle"
+    | "checking"
+    | "uptodate"
+    | "available"
+    | "downloading"
+    | "ready"
+    | "error";
+  /** the version this build is */
+  current: string;
+  /** version offered by the last release we looked at */
+  latest: string;
+  /** release notes, shown in the settings window */
+  notes: string;
+  /** 0..100 while `state === "downloading"` */
+  progress: number;
+  /** reason for `state === "error"` */
+  error: string;
+  /** version already staged and waiting for a restart */
+  staged: string;
+  /** false when the release carried no digest and only the size was checked */
+  verified: boolean;
 }
 
 /** Width bounds the settings sliders and the native clamps agree on. */
@@ -486,6 +538,10 @@ export const DEFAULT_CONFIG: AppConfig = {
   weatherAlwaysOnTop: false,
 
   autostart: false,
+
+  updateAuto: true,
+  updateLastCheck: 0,
+  updateStagedVersion: "",
 
   debugFps: false,
 };

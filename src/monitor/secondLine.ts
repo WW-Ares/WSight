@@ -1,5 +1,6 @@
 import type { Snapshot } from "../shared/types";
 import { formatBytesTotal } from "../shared/format";
+import { shortBoard, shortCpuModel, shortGpuModel, shortMem } from "./hwName";
 
 /**
  * The caption line under each gauge, in one place.
@@ -12,35 +13,15 @@ import { formatBytesTotal } from "../shared/format";
  * moment the app starts (model, DDR type, board), and measurements, which are
  * not. A measurement taken before the collector's first sample is shown as
  * `--` rather than 0: 0% is a reading, `--` is an admission.
+ *
+ * The shortening rules themselves live in `./hwName`, which has no imports so
+ * that the corpus test can pull them straight into Node. This file only
+ * decides *which* rule applies to a given caption option.
  */
 
 const EMPTY = "--";
 
-/** `Intel(R) Core(TM) i9-10900K CPU @ 3.70GHz` -> `i9-10900K`. */
-export function shortCpuModel(brand: string): string {
-  if (!brand) return "";
-  let s = brand.replace(/\((?:R|TM|C)\)/gi, " ");
-  // The trailing "@ 3.70GHz" is the rated clock, which the line above the
-  // caption already shows live.
-  s = s.replace(/@.*$/, " ");
-  s = s.replace(/\b(?:Intel|AMD)\b/gi, " ");
-  s = s.replace(/\b(?:CPU|Processor|APU)\b/gi, " ");
-  // "Core" only survives when it is not the filler in front of the model:
-  // `Core i9-10900K` and `Core Ultra 7 155H` both read better without it,
-  // while `Core 2 Duo` is nothing but that word.
-  s = s.replace(/\bCore\s+(?=i\d|Ultra)/gi, "");
-  s = s.replace(/\b\d+\s*[-–]?\s*Core\b/gi, "");
-  s = s.replace(/with Radeon(?: Graphics)?/gi, " ");
-  return s.replace(/\s+/g, " ").trim();
-}
-
-/** `NVIDIA GeForce RTX 2080 Ti` -> `RTX 2080 Ti`. */
-export function shortGpuModel(name: string): string {
-  if (!name) return "";
-  let s = name.replace(/\b(?:NVIDIA|AMD|Intel)\b/gi, " ");
-  s = s.replace(/\b(?:GeForce|Radeon|Arc)\b/gi, " ");
-  return s.replace(/\s+/g, " ").trim();
-}
+export { shortBoard, shortCpuModel, shortGpuModel, shortMem };
 
 /** 1000 -> `1.0G`, 100 -> `100M`. Gbit links are the common case now. */
 function linkText(mbps: number): string {
@@ -69,7 +50,7 @@ export function secondLineCpu(
     case "procs":
       return pending ? EMPTY : `${snap.procCount} 进程`;
     case "board":
-      return snap.board || EMPTY;
+      return shortBoard(snap.board) || EMPTY;
     default: {
       // The gauge already shows the average; this answers the other question
       // - is one core pinned while the rest idle?
@@ -95,9 +76,13 @@ export function secondLineMem(snap: Snapshot | null, mode: string): string {
         ? `${mem.stickCount}×${Math.round(mem.stickMb / 1024)}G`
         : EMPTY;
     case "partno":
-      return mem.partNo || EMPTY;
+      // The part number only survives when it fits. `CMWX16GC3200C16W2E` is a
+      // real, perfectly readable model that is nonetheless 104 px against a
+      // 70 px budget - showing it means showing `CMWX16GC3200C1…`. The full
+      // string stays reachable on the tooltip.
+      return shortMem(mem.partNo, mem.vendor, mem.ddrType, mem.speedMhz) || EMPTY;
     case "board":
-      return snap.board || EMPTY;
+      return shortBoard(snap.board) || EMPTY;
     default:
       return mem.speedMhz > 0 ? `${mem.speedMhz}MHz` : EMPTY;
   }
@@ -125,7 +110,7 @@ export function secondLineGpu(
             gpu.fanPercent >= 0 ? `${gpu.fanPercent.toFixed(0)}%` : null,
           ]);
     case "board":
-      return snap.board || EMPTY;
+      return shortBoard(snap.board) || EMPTY;
     default:
       return pending
         ? EMPTY
@@ -149,7 +134,7 @@ export function secondLineNet(
     case "link":
       return net ? linkText(net.linkMbps) : EMPTY;
     case "board":
-      return snap.board || EMPTY;
+      return shortBoard(snap.board) || EMPTY;
     default:
       return pending || !net
         ? EMPTY

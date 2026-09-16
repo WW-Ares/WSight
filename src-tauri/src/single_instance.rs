@@ -11,7 +11,7 @@
 pub fn claim() -> bool {
     #[cfg(windows)]
     {
-        claim_windows()
+        matches!(claim_windows(), Some(true))
     }
     #[cfg(not(windows))]
     {
@@ -19,10 +19,46 @@ pub fn claim() -> bool {
     }
 }
 
+/// The `--handover` path of the self-updater: the previous build renamed itself
+/// out of the way and started us while it was still alive, so we are a
+/// "duplicate" for exactly as long as it takes it to exit.
+///
+/// Polling rather than waiting on the handle: the mutex is not signalled, it
+/// *ceases to exist* when its owner dies, and `CreateMutexW` is the only call
+/// that reports a difference between "no such mutex" and "someone owns it".
+/// Returns false on timeout, and the caller then gives up quietly - starting a
+/// second copy next to a live one is the very thing this module exists to stop.
 #[cfg(windows)]
-fn claim_windows() -> bool {
+pub fn wait_for_release(timeout: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match claim_windows() {
+            Some(true) => return true,
+            // Someone still owns it. `claim_windows` already let go of the
+            // handle it was given, so this loop is not itself keeping the
+            // mutex alive.
+            Some(false) => {}
+            None => return false,
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+}
+
+#[cfg(not(windows))]
+pub fn wait_for_release(_timeout: std::time::Duration) -> bool {
+    true
+}
+
+/// `Some(true)` when this process now owns the mutex, `Some(false)` when
+/// another copy owns it, `None` when Windows would not tell us.
+#[cfg(windows)]
+fn claim_windows() -> Option<bool> {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
+    use std::sync::atomic::{AtomicIsize, Ordering};
 
     /// `ERROR_ALREADY_EXISTS` - someone else created the mutex first.
     const ERROR_ALREADY_EXISTS: u32 = 183;
@@ -33,8 +69,14 @@ fn claim_windows() -> bool {
             initial_owner: i32,
             name: *const u16,
         ) -> *mut core::ffi::c_void;
+        fn CloseHandle(handle: *mut core::ffi::c_void) -> i32;
         fn GetLastError() -> u32;
     }
+
+    /// The winning handle, kept for the life of the process. Deliberately never
+    /// closed: the claim has to outlive every other thread, and the mutex dies
+    /// with us anyway.
+    static HELD: AtomicIsize = AtomicIsize::new(0);
 
     let wide: Vec<u16> = OsStr::new("WSight-Single-Instance-Mutex")
         .encode_wide()
@@ -45,10 +87,16 @@ fn claim_windows() -> bool {
         let handle = CreateMutexW(std::ptr::null_mut(), 0, wide.as_ptr());
         if handle.is_null() {
             // Cannot tell - better to start than to refuse to start at all.
-            return true;
+            return None;
         }
-        // The handle is deliberately never closed: the claim has to last for
-        // the whole process, and the mutex dies with us anyway.
-        GetLastError() != ERROR_ALREADY_EXISTS
+        if GetLastError() == ERROR_ALREADY_EXISTS {
+            // Dropping this handle matters: holding one would put us in the
+            // same "somebody owns it" state as the real owner, and
+            // `wait_for_release` would never see the mutex go away.
+            CloseHandle(handle);
+            return Some(false);
+        }
+        HELD.store(handle as isize, Ordering::SeqCst);
+        Some(true)
     }
 }

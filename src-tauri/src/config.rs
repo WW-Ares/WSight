@@ -153,6 +153,26 @@ pub struct AppConfig {
     /// "is it the frame rate or the sample rate" reports.
     #[serde(default)]
     pub debug_fps: bool,
+
+    // -------------------------------------------------------------- update
+    /// Check GitHub for a newer release, download it and offer to restart into
+    /// it. This is the *only* switch, on purpose: a floating card has no room
+    /// to explain the difference between "checking" and "downloading", and
+    /// nobody who turns updates off wants either half.
+    ///
+    /// Off means the app makes no update request of its own. The "检查更新"
+    /// button in settings keeps working - "do not phone home" and "let me ask
+    /// once" are not the same wish, and conflating them is how a switch like
+    /// this gets resented.
+    pub update_auto: bool,
+    /// Unix seconds of the last completed check, for the 6-hour spacing.
+    /// Internal - not shown.
+    pub update_last_check: u64,
+    /// Version already downloaded, verified and staged next to the exe, waiting
+    /// for a restart. Empty when there is nothing staged. Persisted because a
+    /// staged update has to survive the app being closed and reopened, or the
+    /// "已就绪" prompt would vanish along with the process that earned it.
+    pub update_staged_version: String,
 }
 
 impl Default for AppConfig {
@@ -202,6 +222,10 @@ impl Default for AppConfig {
 
             autostart: false,
             debug_fps: false,
+
+            update_auto: true,
+            update_last_check: 0,
+            update_staged_version: String::new(),
         }
     }
 }
@@ -374,4 +398,23 @@ pub fn sanitize(cfg: &mut AppConfig) {
     fix_color(&mut cfg.color_mem, COLOR_MEM);
     fix_color(&mut cfg.color_gpu, COLOR_GPU);
     fix_color(&mut cfg.color_net, COLOR_NET);
+
+    // A staged version that does not parse is a hand-edited file or a version
+    // this build cannot compare against. Clearing it costs one re-download;
+    // keeping it would make the updater try to launch a file it cannot name.
+    cfg.update_staged_version = cfg.update_staged_version.trim().to_string();
+    if !cfg.update_staged_version.is_empty() && !is_version_like(&cfg.update_staged_version) {
+        cfg.update_staged_version.clear();
+    }
+}
+
+/// `1.2.3`, `0.5.0` - what a tag looks like once the leading `v` is off.
+/// Deliberately strict: this string becomes part of a filename and gets
+/// compared against the running build.
+pub fn is_version_like(s: &str) -> bool {
+    let parts: Vec<&str> = s.split('.').collect();
+    parts.len() >= 2
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.len() <= 5 && p.bytes().all(|b| b.is_ascii_digit()))
 }

@@ -22,6 +22,7 @@ import {
   type AppConfig,
   type GeoCity,
   type Snapshot,
+  type UpdateStatus,
 } from "../shared/types";
 import "./settings.css";
 
@@ -267,6 +268,54 @@ function refreshOptions(current: number): number[] {
     : [...REFRESH_PRESETS, current].sort((a, b) => a - b);
 }
 
+/**
+ * One line describing what the updater is doing, in the user's terms.
+ *
+ * `auto` only matters in the resting states: with the switch off, "尚未检查"
+ * would read as a fault where "自动更新已关闭" reads as a choice.
+ */
+function updateText(s: UpdateStatus | null, auto: boolean): string {
+  if (!s) return auto ? "启动后自动检查" : "自动更新已关闭";
+  switch (s.state) {
+    case "checking":
+      return "正在检查…";
+    case "downloading":
+      return `正在下载 v${s.latest} · ${Math.floor(s.progress)}%`;
+    case "uptodate":
+      return "已是最新版本";
+    case "available":
+      return `发现新版本 v${s.latest}——自动更新已关闭，点右边手动下载`;
+    case "ready":
+      // Never claim a check that did not happen: a release without a `digest`
+      // is only size-matched, and the wording says so.
+      return s.verified
+        ? `v${s.staged} 已下载并校验通过，重启即可完成更新`
+        : `v${s.staged} 已下载（该版本未提供校验值，仅核对文件大小）`;
+    case "error":
+      return s.error;
+    default:
+      return auto ? "启动后自动检查" : "自动更新已关闭";
+  }
+}
+
+/** Which colour the status dot wears. */
+function updateTone(s: UpdateStatus | null): string {
+  if (!s) return "idle";
+  switch (s.state) {
+    case "ready":
+      return "ok";
+    case "available":
+      return "new";
+    case "error":
+      return "err";
+    case "checking":
+    case "downloading":
+      return "busy";
+    default:
+      return "idle";
+  }
+}
+
 function formatBytes(n: number): string {
   if (!Number.isFinite(n) || n <= 0) return "0G";
   const units = ["B", "K", "M", "G", "T"];
@@ -394,6 +443,87 @@ export function SettingsPanel({ initial }: { initial: AppConfig }) {
   const [testState, setTestState] = useState<Status | null>(null);
   const [testing, setTesting] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+
+  // ------------------------------------------------------------ updates
+
+  const [upd, setUpd] = useState<UpdateStatus | null>(null);
+  const [updBusy, setUpdBusy] = useState(false);
+
+  /**
+   * Read the status once on open. A build staged before the last restart is
+   * still on disk - the backend seeds it from the config at start-up - so the
+   * "重启更新" prompt comes back instead of the user having to check again.
+   */
+  useEffect(() => {
+    let alive = true;
+    api
+      .updateStatus()
+      .then((s) => {
+        if (alive) setUpd(s);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // A check or a download runs on the Rust side and can take a while; there is
+  // no event stream for it, so poll while one is in flight and stop otherwise.
+  // 400ms is fast enough for the progress bar to look alive and slow enough to
+  // cost nothing (the status is a mutex read, no I/O).
+  const updState = upd?.state ?? "";
+  useEffect(() => {
+    if (updState !== "checking" && updState !== "downloading") return;
+    const id = window.setInterval(() => {
+      api
+        .updateStatus()
+        .then(setUpd)
+        .catch(() => {});
+    }, 400);
+    return () => window.clearInterval(id);
+  }, [updState]);
+
+  const checkNow = () => {
+    setUpdBusy(true);
+    api
+      .checkUpdate(true)
+      .then((s) => setUpd(s))
+      .catch((e: unknown) =>
+        setStatus({ kind: "err", text: `检查更新失败：${String(e)}` }),
+      )
+      .finally(() => setUpdBusy(false));
+  };
+
+  const restartNow = () => {
+    const target = upd?.staged || upd?.latest || "新版本";
+    if (
+      !window.confirm(
+        `现在重启并安装 ${target}？两个悬浮窗会关闭一下，然后自动回来。`,
+      )
+    ) {
+      return;
+    }
+    setStatus({ kind: "idle", text: "正在重启…" });
+    // On success the app is gone before this resolves - the promise only ever
+    // settles when the swap failed.
+    void api.applyUpdate().catch((e: unknown) => {
+      setStatus({ kind: "err", text: `更新失败：${String(e)}` });
+      api
+        .updateStatus()
+        .then(setUpd)
+        .catch(() => {});
+    });
+  };
+
+  const discardNow = () => {
+    api
+      .discardUpdate()
+      .then(() => api.updateStatus())
+      .then(setUpd)
+      .catch((e: unknown) =>
+        setStatus({ kind: "err", text: `取消失败：${String(e)}` }),
+      );
+  };
 
   // ------------------------------------------------------- auto save
 
@@ -771,7 +901,7 @@ export function SettingsPanel({ initial }: { initial: AppConfig }) {
               onChange={(v) => update({ monitorAlwaysOnTop: v })}
             />
           </Row>
-          <Row label="显示 GPU 环形" hint="非 NVIDIA 显卡无数据">
+          <Row label="显示 GPU 环形" hint="非 NVIDIA 显卡只能读型号与显存总量">
             <Toggle
               checked={draft.monitorShowGpu}
               onChange={(v) => update({ monitorShowGpu: v })}
@@ -1053,6 +1183,60 @@ export function SettingsPanel({ initial }: { initial: AppConfig }) {
               onChange={(v) => update({ autostart: v })}
             />
           </Row>
+        </Section>
+
+        <Section title="更新">
+          <Row
+            label="自动更新"
+            hint="启动 15 秒后检查一次，之后每 6 小时一次；只下载，不会自己重启，安装要你点「重启更新」。"
+          >
+            <Toggle
+              checked={draft.updateAuto}
+              onChange={(v) => update({ updateAuto: v })}
+            />
+          </Row>
+
+          <div className="st-upd">
+            <div className="st-upd-head">
+              <i className={`st-upd-dot ${updateTone(upd)}`} />
+              <span className="st-upd-text">{updateText(upd, draft.updateAuto)}</span>
+              <b className="st-upd-cur">{APP_VERSION_LABEL}</b>
+            </div>
+
+            {updState === "downloading" ? (
+              <div className="st-bar">
+                <span style={{ width: `${Math.min(100, Math.max(2, upd?.progress ?? 0))}%` }} />
+              </div>
+            ) : null}
+
+            {upd?.notes && (updState === "ready" || updState === "available") ? (
+              <details className="st-upd-notes">
+                <summary>本次更新内容</summary>
+                <pre>{upd.notes}</pre>
+              </details>
+            ) : null}
+
+            <div className="st-upd-actions">
+              {updState === "ready" ? (
+                <button type="button" className="st-btn" onClick={restartNow}>
+                  重启更新
+                </button>
+              ) : null}
+              <button
+                type="button"
+                className="st-btn ghost"
+                disabled={updBusy || updState === "downloading"}
+                onClick={checkNow}
+              >
+                {updBusy || updState === "checking" ? "检查中…" : "检查更新"}
+              </button>
+              {updState === "ready" ? (
+                <button type="button" className="st-link" onClick={discardNow}>
+                  忽略这个版本
+                </button>
+              ) : null}
+            </div>
+          </div>
         </Section>
 
         {testState ? (

@@ -29,7 +29,11 @@ import { previousReleaseTag } from "./lib/release-range.mjs";
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const ALLOWED_MESSAGES = new Set(["Initial commit", "Update"]);
 const REQUIRED_ASSET = "WSight.exe";
-const OPTIONAL_ASSETS = ["screenshot-weather.png", "screenshot-monitor.png"];
+const OPTIONAL_ASSETS = [
+  "screenshot-monitor.png",
+  "screenshot-weather.png",
+  "screenshot-update.png",
+];
 
 const version =
   process.argv[2] ?? JSON.parse(readFileSync(join(root, "package.json"), "utf8")).version;

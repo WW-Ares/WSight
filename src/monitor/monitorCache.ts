@@ -43,7 +43,12 @@ export function snapshotFromCache(cache: MonitorCache): Snapshot {
     gpu: cache.gpu
       ? {
           name: cache.gpu.name,
-          load: 0,
+          // -1, not 0: a remembered card has a known name and a known amount
+          // of memory, and no reading at all for how busy it is. Writing 0
+          // here would let the memory line print `0.0/11.0G` before the first
+          // sample, which reads as "nothing is allocated" rather than "not
+          // measured yet".
+          load: -1,
           memTotal: cache.gpu.memTotal,
           memUsed: 0,
           tempC: null,

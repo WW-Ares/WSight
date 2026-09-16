@@ -5,6 +5,7 @@ mod launchlog;
 mod monitorcache;
 mod native;
 mod single_instance;
+mod updater;
 mod weather;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -43,6 +44,19 @@ pub fn log_launch(line: &str) {
 /// instead of opening a second, dead window.
 pub fn claim_instance() -> bool {
     single_instance::claim()
+}
+
+/// Wait for the build the updater just replaced to finish exiting, then take
+/// the single-instance mutex. False on timeout; `main` then exits quietly,
+/// because starting a second copy beside a live one is the failure this whole
+/// mechanism exists to prevent.
+pub fn await_instance() -> bool {
+    single_instance::wait_for_release(Duration::from_secs(updater::HANDOVER_WAIT_SECS))
+}
+
+/// Delete the exe the updater stepped aside, plus any earlier leftovers.
+pub fn clean_up_replaced(replaced: &str) {
+    updater::clean_up(replaced);
 }
 
 // ---------------------------------------------------------------- helpers
@@ -974,6 +988,45 @@ fn quit_app(app: AppHandle) {
     app.exit(0);
 }
 
+// ---------------------------------------------------------------- updates
+
+/// What the updater knows right now. Cheap and lock-free enough to poll while
+/// a download is in flight.
+#[tauri::command]
+fn update_status() -> updater::UpdateStatus {
+    updater::snapshot()
+}
+
+/// Look for a new release. `manual` marks the check the user asked for with the
+/// button, which is allowed to report a failure and will download even when the
+/// automatic switch is off - stopping at "there is one, go find it" would be a
+/// strange reading of "check now".
+///
+/// `auto` has to be a parameter and not two commands, because it is the same
+/// code path: the difference is only who is allowed to complain.
+#[tauri::command]
+async fn check_update(app: AppHandle, manual: Option<bool>) -> updater::UpdateStatus {
+    updater::check(app, manual.unwrap_or(true)).await;
+    updater::snapshot()
+}
+
+/// Swap in the staged build and restart. On success this process is gone before
+/// the call returns - the reply is for the failure case only.
+#[tauri::command]
+fn apply_update(app: AppHandle) -> Result<(), String> {
+    updater::apply()?;
+    // The replacement is running and is waiting on our mutex, which we release
+    // by dying. Nothing else here is worth finishing.
+    app.exit(0);
+    Ok(())
+}
+
+/// Forget a staged update: delete the file and clear the config key.
+#[tauri::command]
+fn discard_update(app: AppHandle) -> Result<(), String> {
+    updater::discard(&app)
+}
+
 /// Open a URL in whatever the user has registered as their browser.
 ///
 /// Only `http`/`https` get through. This command is reachable from a clickable
@@ -1264,6 +1317,10 @@ pub fn run() {
             toggle_widget,
             open_settings_window,
             open_url,
+            update_status,
+            check_update,
+            apply_update,
+            discard_update,
             quit_app
         ])
         .on_window_event(|window, event| {
@@ -1332,7 +1389,12 @@ pub fn run() {
             }
 
             spawn_collector(handle.clone());
-            spawn_weather(handle);
+            spawn_weather(handle.clone());
+
+            // An update downloaded before the last restart is still sitting
+            // beside the exe, and the settings window has to go on offering it.
+            updater::restore_staged(&cfg.update_staged_version);
+            updater::start(handle);
             Ok(())
         })
         .run(tauri::generate_context!())

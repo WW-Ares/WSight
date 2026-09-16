@@ -1,6 +1,6 @@
 [package]
 name = "wsight"
-version = "0.4.5"
+version = "0.5.0"
 description = "WSight - lightweight desktop widgets: hardware monitor panel + QWeather panel"
 authors = ["WSight"]
 edition = "2021"
@@ -34,12 +34,27 @@ reqwest = { version = "0.12", default-features = false, features = [
   "rustls-tls",
   "gzip",
 ] }
-tokio = { version = "1", features = ["rt-multi-thread", "time", "macros"] }
+tokio = { version = "1", features = [
+  "rt-multi-thread",
+  "time",
+  "macros",
+  # `fs` and `io-util` are what the self-updater streams a download with
+  # (`tokio::fs::File` + `AsyncWriteExt`). Tauri enables both transitively, so
+  # they are already in the build - listed here because relying on another
+  # crate's feature list is how a `tokio::fs` call starts failing to compile on
+  # a dependency bump.
+  "fs",
+  "io-util",
+] }
 
 # Windows registry helpers for the auto-start `Run` key.
 # `reg.exe` was simpler but is blocked by some sandbox/AV policies; using the
 # Win32 API directly avoids spawning a child process and keeps quotes correct.
 winreg = "0.52"
+
+# SHA-256 for the self-updater: GitHub publishes a `digest` per release asset
+# and a downloaded binary is not run until it matches.
+sha2 = "0.10"
 
 [features]
 # The Tauri CLI turns this on for production builds. WITHOUT it `tauri-macros`

@@ -13,19 +13,49 @@ use std::time::Duration;
 const STARTUP_DELAY_SECS: u64 = 5;
 
 fn main() {
-    let startup = std::env::args().skip(1).any(|a| a == "--startup");
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let has = |flag: &str| args.iter().any(|a| a == flag);
 
-    wsight_lib::log_launch(if startup {
-        "launch (auto-start)"
-    } else {
-        "launch (manual)"
+    // The three ways this process can come into being. `--handover` is the
+    // self-updater's, and it is the only one that must not refuse to start when
+    // another WSight is still running - see below.
+    let handover = has("--handover");
+    let startup = !handover && has("--startup");
+
+    // Set by the updater together with `--handover`: the path of the old exe it
+    // stepped aside, which is ours to delete once its process is gone.
+    let replaced = args
+        .iter()
+        .position(|a| a == "--replaced")
+        .and_then(|i| args.get(i + 1))
+        .cloned()
+        .unwrap_or_default();
+
+    wsight_lib::log_launch(match (handover, startup) {
+        (true, _) => "launch (handover)",
+        (false, true) => "launch (auto-start)",
+        _ => "launch (manual)",
     });
 
-    // Checked before the delay: a second copy started five seconds from now is
-    // just as redundant as one started right away.
-    if !wsight_lib::claim_instance() {
-        wsight_lib::log_launch("another instance already running - exiting");
-        return;
+    if handover {
+        // The build that started us has already renamed itself to
+        // `WSight.exe.old-<version>` and is on its way out, but it still holds
+        // the single-instance mutex - it cannot not hold it, that is what stops
+        // the logon double-launch. So we wait for the mutex to disappear rather
+        // than exiting on sight, which is also why no helper exe is needed.
+        if !wsight_lib::await_instance() {
+            wsight_lib::log_launch("handover: previous instance still running - exiting");
+            return;
+        }
+        // Safe now: the old process is dead, so the file is no longer locked.
+        wsight_lib::clean_up_replaced(&replaced);
+    } else {
+        // Checked before the delay: a second copy started five seconds from now
+        // is just as redundant as one started right away.
+        if !wsight_lib::claim_instance() {
+            wsight_lib::log_launch("another instance already running - exiting");
+            return;
+        }
     }
 
     if startup {
