@@ -147,6 +147,6 @@ console.log(`--- 归并稿前 12 行 ---`);
 console.log(notes.split(/\r?\n/).slice(0, 12).join("\n"));
 console.log("---");
 console.log(
-  `下一步：核对措辞并合并同主题条目，然后\n` +
-    `  gh release create v${version} WSight.exe docs/*.png --notes-file "${target}"`,
+  `下一步：核对措辞并合并同主题条目，然后（附件只传 exe，不传截图）\n` +
+    `  gh release create v${version} WSight.exe --notes-file "${target}"`,
 );

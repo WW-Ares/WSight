@@ -77,5 +77,5 @@ console.log(`  大小    ${(bytes / 1024 / 1024).toFixed(2)} MB`);
 console.log(`  路径    ${staged}`);
 console.log(`  sha256  ${sha}`);
 console.log("");
-console.log("发布：");
-console.log(`  gh release create v${v} WSight.exe docs/*.png --notes-file .verify/release-notes.md`);
+console.log("发布（附件只传 exe，不传截图）：");
+console.log(`  gh release create v${v} WSight.exe --notes-file .verify/release-notes.md`);

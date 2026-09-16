@@ -10,8 +10,8 @@
  *   2. 本地 HEAD 与远端 main 一致（推上去了、也没落后）
  *   3. 远端最后一条提交说明只有那两个词之一
  *   4. 标签 v<版本> 存在，且指向 HEAD
- *   5. Release 存在，附件里有 WSight.exe（少截图只警告），并且附件的 sha256
- *      与本地 WSight.exe 一致 —— 名字对不代表内容对：v0.5.0 传上去的那个包
+ *   5. Release 存在，附件里有 WSight.exe（且**只该有它**，夹带截图会提醒），并且附件的
+ *      sha256 与本地 WSight.exe 一致 —— 名字对不代表内容对：v0.5.0 传上去的那个包
  *      名字没错、大小正常，前端却是上一个版本的，只查名字根本查不出来
  *   6. Release 说明覆盖了"上一个已发布标签 → 本次版本"区间里的**每一个**版本，
  *      并且是**归并稿**——按内容归类，不是逐版本罗列。只提交、没发过 Release 的
@@ -32,11 +32,13 @@ import { previousReleaseTag } from "./lib/release-range.mjs";
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const ALLOWED_MESSAGES = new Set(["Initial commit", "Update"]);
 const REQUIRED_ASSET = "WSight.exe";
-const OPTIONAL_ASSETS = [
-  "screenshot-monitor.png",
-  "screenshot-weather.png",
-  "screenshot-update.png",
-];
+/**
+ * 发布附件只上 exe，截图不上传。
+ *
+ * 截图留在仓库 `docs/` 里给 README 和文档用，Release 附件不带 —— 用户要的是
+ * 能跑的程序，混着几张 png 只会让"下载哪个"变含糊。这条按大王 2026-09-16 的要求定下。
+ */
+const IMAGE_ASSET = /\.(png|jpe?g|gif|webp|bmp)$/i;
 
 const version =
   process.argv[2] ?? JSON.parse(readFileSync(join(root, "package.json"), "utf8")).version;
@@ -219,9 +221,15 @@ if (!gh) {
           }
         }
       }
-      const missing = OPTIONAL_ASSETS.filter((name) => !names.includes(name));
-      if (missing.length) {
-        add("warn", "Release 附件含截图", `缺少 ${missing.join(" / ")}`);
+      const images = names.filter((name) => IMAGE_ASSET.test(name));
+      if (images.length) {
+        add(
+          "warn",
+          "Release 附件只有 exe",
+          `带了图片（${images.join(" / ")}）—— 截图留在仓库 docs/ 即可，不用上传`,
+        );
+      } else {
+        add("ok", "Release 附件只有 exe", "未夹带截图");
       }
 
       const body = (release.body ?? "").trim();

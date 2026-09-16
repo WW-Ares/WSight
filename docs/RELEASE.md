@@ -91,7 +91,8 @@
 6. **征得同意后**推送 main 与标签。
 7. 生成发布说明并建 Release：
    `pnpm release:notes` → **检查措辞、合并同主题条目** →
-   `gh release create vX.Y.Z WSight.exe docs/*.png --notes-file …`。
+   `gh release create vX.Y.Z WSight.exe --notes-file …`。
+   **附件只传 `WSight.exe`，不要传截图**（截图留在仓库 `docs/` 给 README 用）。
    注意看它打印的"发布区间"与"覆盖 N 个版本"——数量不对就是漏带了。
 8. **发版后自检**：`pnpm release:check`。全绿才算这一版发完了；
    有任何 ❌ 就当场处理，别留在下个版本。
@@ -110,7 +111,10 @@
   更新器会拿 GitHub 给的 `digest` 核对下载到的文件，对不上就丢弃。
   （老版本发布页没有 `digest` 时不至于失败，但界面会写明"仅核对文件大小"。）
 - **忘了传附件 = 这个版本更新不了**（会报"这个版本没有附带 exe"），
-  所以第 7 步的 `WSight.exe docs/*.png` 一个都不能少。
+  所以第 7 步那颗 `WSight.exe` 一次都不能少。
+- **附件只放 exe 一个**（2026-09-16 起）：截图不再随 Release 上传，它们留在仓库
+  `docs/` 里由 README 引用。发布页上多几张 png 只是让人多犹豫"该下哪个"，
+  而更新通道真正需要的只有那一个 exe。自检会在附件里发现图片时提醒。
 
 ### v0.5.1 起：更新什么时候真正装上
 
