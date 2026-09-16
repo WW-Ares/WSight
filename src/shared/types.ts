@@ -435,8 +435,14 @@ export interface UpdateStatus {
   error: string;
   /** version already staged and waiting for a restart */
   staged: string;
-  /** false when the release carried no digest and only the size was checked */
-  verified: boolean;
+  /**
+   * Whether the download was checked against GitHub's digest.
+   *
+   * `null` means "nothing was checked in this session" - a staged update that
+   * survived a restart. The wording has a case for it, because claiming either
+   * way there would be a lie.
+   */
+  verified: boolean | null;
 }
 
 /** Width bounds the settings sliders and the native clamps agree on. */

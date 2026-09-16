@@ -286,11 +286,15 @@ function updateText(s: UpdateStatus | null, auto: boolean): string {
     case "available":
       return `发现新版本 v${s.latest}——自动更新已关闭，点右边手动下载`;
     case "ready":
-      // Never claim a check that did not happen: a release without a `digest`
-      // is only size-matched, and the wording says so.
-      return s.verified
-        ? `v${s.staged} 已下载并校验通过，重启即可完成更新`
-        : `v${s.staged} 已下载（该版本未提供校验值，仅核对文件大小）`;
+      // Three cases, not two: after a restart the digest result is gone, and
+      // claiming either way would put a false statement in front of the user.
+      if (s.verified === true) {
+        return `v${s.staged} 已下载并校验通过，重启即可完成更新`;
+      }
+      if (s.verified === false) {
+        return `v${s.staged} 已下载（该版本未提供校验值，仅核对文件大小）`;
+      }
+      return `v${s.staged} 已下载，重启即可完成更新`;
     case "error":
       return s.error;
     default:

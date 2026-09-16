@@ -92,8 +92,14 @@ pub struct UpdateStatus {
     pub error: String,
     /// Version already staged and waiting for a restart.
     pub staged: String,
-    /// False when the release had no `digest` and only the size was checked.
-    pub verified: bool,
+    /// Whether the download was checked against GitHub's `digest`.
+    ///
+    /// Tri-state on purpose. `Some(true)` and `Some(false)` are the two cases
+    /// `download()` can produce; `None` means nothing was checked *in this
+    /// session*, which is what a staged update carried over a restart looks
+    /// like. Guessing either way there would put a false claim in front of the
+    /// user - "未提供校验值" on a download that was in fact verified.
+    pub verified: Option<bool>,
 }
 
 static STATUS: OnceLock<Mutex<UpdateStatus>> = OnceLock::new();
@@ -139,6 +145,10 @@ pub fn restore_staged(version: &str) {
         with_status(|s| {
             s.staged = version.to_string();
             s.latest = version.to_string();
+            // Deliberately left unknown: the digest check happened in an
+            // earlier process and its result was never written down. The UI has
+            // a wording for exactly this case rather than inventing one.
+            s.verified = None;
             if s.state != "downloading" {
                 s.state = "ready".to_string();
             }
@@ -164,6 +174,7 @@ pub fn discard(app: &AppHandle) -> Result<(), String> {
         s.notes.clear();
         s.staged.clear();
         s.progress = 0.0;
+        s.verified = None;
         s.error.clear();
     });
     Ok(())
@@ -469,7 +480,7 @@ pub async fn check(app: AppHandle, manual: bool) {
             s.state = "ready".to_string();
             s.latest = version;
             s.staged = s.latest.clone();
-            s.verified = verified;
+            s.verified = Some(verified);
             s.progress = 100.0;
         }
         Ok(Outcome::Available { version }) => {
