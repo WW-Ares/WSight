@@ -15,11 +15,22 @@
  * Usage: node scripts/pack.mjs        (after `pnpm build` and `tauri build`)
  */
 import { createHash } from "node:crypto";
-import { copyFileSync, readFileSync, statSync } from "node:fs";
+import { copyFileSync, existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+
+/** Newest mtime anywhere under `dir`, or 0 if it is not there. */
+function newestMtime(dir) {
+  if (!existsSync(dir)) return 0;
+  let newest = 0;
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const path = join(dir, entry.name);
+    newest = Math.max(newest, entry.isDirectory() ? newestMtime(path) : statSync(path).mtimeMs);
+  }
+  return newest;
+}
 
 function version() {
   const m = /"version"\s*:\s*"([^"]+)"/.exec(readFileSync(join(root, "package.json"), "utf8"));
@@ -36,6 +47,23 @@ try {
 } catch {
   console.error(`找不到构建产物：${built}`);
   console.error("先跑 pnpm build，再跑 pnpm tauri build --no-bundle。");
+  process.exit(1);
+}
+
+// The exe embeds `dist/` as it stood when the link step ran, so a dist newer
+// than the binary means the binary predates the frontend - it is carrying the
+// previous UI. That is how v0.5.0 went out claiming to be 0.5.0 while showing
+// 0.4.5 in the settings window: `tauri build --config
+// '{"build":{"beforeBuildCommand":""}}'` skips `pnpm build`, so the stale dist
+// was embedded whole. A second of slack absorbs filesystem timestamp rounding.
+const distAge = newestMtime(join(root, "dist"));
+const exeAge = statSync(built).mtimeMs;
+if (distAge > exeAge + 1000) {
+  console.error("构建产物比前端旧：exe 里嵌的是上一次的前端。");
+  console.error(`  dist/ 最新  ${new Date(distAge).toLocaleString()}`);
+  console.error(`  ${built}  ${new Date(exeAge).toLocaleString()}`);
+  console.error("");
+  console.error("先跑 pnpm build（vite build），再跑 tauri build。");
   process.exit(1);
 }
 

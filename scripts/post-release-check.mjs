@@ -10,7 +10,9 @@
  *   2. 本地 HEAD 与远端 main 一致（推上去了、也没落后）
  *   3. 远端最后一条提交说明只有那两个词之一
  *   4. 标签 v<版本> 存在，且指向 HEAD
- *   5. Release 存在，附件里有 WSight.exe（少截图只警告）
+ *   5. Release 存在，附件里有 WSight.exe（少截图只警告），并且附件的 sha256
+ *      与本地 WSight.exe 一致 —— 名字对不代表内容对：v0.5.0 传上去的那个包
+ *      名字没错、大小正常，前端却是上一个版本的，只查名字根本查不出来
  *   6. Release 说明覆盖了"上一个已发布标签 → 本次版本"区间里的**每一个**版本，
  *      并且是**归并稿**——按内容归类，不是逐版本罗列。只提交、没发过 Release 的
  *      中间版本必须跟着本次一起露脸；同一处功能的多轮改动（先加上、后修好）
@@ -19,7 +21,8 @@
  * 有 ❌ 退出码 1 —— 可以直接接在发布流程末尾当守门员。
  */
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -191,6 +194,30 @@ if (!gh) {
           "Release 附件含安装产物",
           `缺少 ${REQUIRED_ASSET}，现有：${names.join(" / ") || "(空)"}`,
         );
+      }
+
+      // 附件是不是本地这一份？用户装的就是它，所以它必须和本地打出来的
+      // 那个文件一模一样。只看名字会漏掉"传了别的构建产物"这种情况。
+      const asset = (release.assets ?? []).find((a) => a.name === REQUIRED_ASSET);
+      const local = join(root, REQUIRED_ASSET);
+      if (asset) {
+        if (!existsSync(local)) {
+          add("warn", "附件与本地产物一致", `本地没有 ${REQUIRED_ASSET}，没法比对`);
+        } else {
+          const sha = createHash("sha256").update(readFileSync(local)).digest("hex");
+          const digest = String(asset.digest ?? "").replace(/^sha256:/i, "").toLowerCase();
+          if (!digest) {
+            add("warn", "附件与本地产物一致", "GitHub 没给 digest，无法比对");
+          } else if (digest === sha) {
+            add("ok", "附件与本地产物一致", `sha256 ${sha.slice(0, 12)}…`);
+          } else {
+            add(
+              "fail",
+              "附件与本地产物一致",
+              `附件 ${digest.slice(0, 12)}… ≠ 本地 ${sha.slice(0, 12)}…`,
+            );
+          }
+        }
       }
       const missing = OPTIONAL_ASSETS.filter((name) => !names.includes(name));
       if (missing.length) {

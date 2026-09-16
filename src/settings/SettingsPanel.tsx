@@ -1214,7 +1214,7 @@ export function SettingsPanel({ initial }: { initial: AppConfig }) {
         <Section title="更新">
           <Row
             label="自动更新"
-            hint="启动 15 秒后检查一次，之后每 6 小时一次；只下载，不会自己重启，安装要你点「重启更新」。"
+            hint="启动 15 秒后检查一次，之后每 6 小时一次。下载并校验通过后会在下次启动时自动装好；不想等，可以点「重启更新」立即生效。"
           >
             <Toggle
               checked={draft.updateAuto}

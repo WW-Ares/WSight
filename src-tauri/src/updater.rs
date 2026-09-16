@@ -8,13 +8,28 @@
 //! The whole design turns on one Windows rule: **you cannot overwrite a running
 //! executable, but you can rename it.** So the swap is
 //!
-//! 1. `WSight.exe`      -> `WSight.exe.old-0.4.5`
-//! 2. `WSight.exe.new`  -> `WSight.exe`
+//! 1. `WSight.exe`         -> `WSight-old-0.4.5.exe`
+//! 2. `WSight.exe.new`     -> `WSight.exe`
 //! 3. launch the new `WSight.exe`, then exit
-//! 4. the new process deletes `WSight.exe.old-*`
+//! 4. the new process deletes older `WSight-old-*.exe`, keeping one
 //!
 //! The path never changes, so the auto-start entry, any shortcut and the update
 //! itself all keep talking about the same file.
+//!
+//! **The swap is started from two places, and the unattended one is the point.**
+//! A button in settings ("重启更新") installs a staged build immediately. But a
+//! desktop widget's settings window is opened roughly never, so on its own that
+//! button means an update could sit on disk forever - downloaded, verified, and
+//! never once installed. `main` therefore applies a staged build at launch,
+//! before any window exists, and hands over to it; the user's next logon is
+//! simply the new version. Nothing is lost by doing it there: at that moment
+//! there is no window, no unsaved state, and no user watching.
+//!
+//! What that costs is a way back, which is why step 4 keeps one generation of
+//! the previous build instead of deleting it. If the new build will not start
+//! there is no window to offer a "roll back" button from, so the way back has
+//! to be a file the user can double-click - hence a name Windows will run,
+//! rather than the `.old-` suffix this used to use.
 //!
 //! Two things make step 3 non-obvious:
 //!
@@ -59,7 +74,16 @@ const ASSET_NAME: &str = "WSight.exe";
 const DOWNLOAD_SUFFIX: &str = ".download";
 const STAGED_SUFFIX: &str = ".new";
 /// What we rename ourselves to before letting the new build take our place.
-const OLD_PREFIX: &str = ".old-";
+///
+/// It has to end in `.exe`. The one moment this file matters is the moment the
+/// fresh build will not start, and then there is no window left to offer a
+/// roll-back button from - the user has the file and nothing else. A name
+/// Windows refuses to run is not a way back.
+const OLD_STEM: &str = "WSight-old-";
+const OLD_EXT: &str = ".exe";
+/// The suffix this used before the name had to be runnable. Nothing writes it
+/// any more, but a folder that still holds one should not keep it forever.
+const LEGACY_OLD_PREFIX: &str = "WSight.exe.old-";
 
 /// First check this long after launch - the same 15 s the weather panel waits,
 /// so start-up is not competing with a network round trip.
@@ -167,6 +191,27 @@ pub fn restore_staged(version: &str) {
     }
 }
 
+/// True when a verified build is sitting on disk waiting to be installed.
+///
+/// The launch path asks this before any window exists, so it has to stay a
+/// file check with no state behind it.
+pub fn staged_ready() -> bool {
+    staged_path().exists()
+}
+
+/// True when this process is one of the kept-back copies from an earlier
+/// update.
+///
+/// Such a copy exists for exactly one purpose: to be double-clicked when the
+/// new build will not start. If it updated itself it would walk the user
+/// straight back into the build they were fleeing, silently, on the next
+/// launch - so it does not use the updater at all.
+pub fn is_previous_copy() -> bool {
+    exe_path()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .is_some_and(|n| is_previous_name(&n))
+}
+
 /// Throw away a staged build the user does not want.
 ///
 /// The automatic path never needs this - a newer release supersedes the one on
@@ -243,6 +288,26 @@ fn staged_path() -> PathBuf {
     let exe = exe_path().unwrap_or_else(|| PathBuf::from("WSight.exe"));
     let dir = exe.parent().map(Path::to_path_buf).unwrap_or_default();
     dir.join(format!("WSight.exe{STAGED_SUFFIX}"))
+}
+
+/// The name this build steps aside to when a new one takes its place.
+fn previous_name(version: &str) -> String {
+    format!("{OLD_STEM}{version}{OLD_EXT}")
+}
+
+fn previous_path(version: &str) -> PathBuf {
+    let exe = exe_path().unwrap_or_else(|| PathBuf::from("WSight.exe"));
+    let dir = exe.parent().map(Path::to_path_buf).unwrap_or_default();
+    dir.join(previous_name(version))
+}
+
+/// True for the kept-back copies this updater creates and nothing else, which
+/// is what lets the sweep in `clean_up` delete by pattern without ever being
+/// able to hit a file the user put in the folder.
+fn is_previous_name(name: &str) -> bool {
+    name.starts_with(OLD_STEM)
+        && name.ends_with(OLD_EXT)
+        && name.len() > OLD_STEM.len() + OLD_EXT.len()
 }
 
 /// Where a download lands. The exe's own folder when it can be written to, so
@@ -481,6 +546,20 @@ fn touch_config(app: &AppHandle, edit: impl FnOnce(&mut AppConfig)) {
 /// is allowed to report failures in the UI; an automatic one stays quiet,
 /// because a network that is down is not the user's problem.
 pub async fn check(app: AppHandle, manual: bool) {
+    if is_previous_copy() {
+        // A kept-back copy exists to be run when the new build is broken.
+        // Finding an update from here would install the very build the user
+        // just stepped away from - and, with launch-time installs, do it on
+        // the next start without asking. So it never looks.
+        note("check skipped - running as a kept-back copy");
+        with_status(|s| {
+            if manual {
+                s.state = "error".to_string();
+                s.error = "当前运行的是回退副本，已停用更新检查".to_string();
+            }
+        });
+        return;
+    }
     let busy = with_status(|s| s.state == "checking" || s.state == "downloading");
     if busy {
         return;
@@ -651,6 +730,10 @@ fn read_config(app: &AppHandle) -> AppConfig {
 /// The loop the app runs in the background. Reads the switch every pass, so
 /// turning updates back on takes effect without a restart.
 pub fn start(app: AppHandle) {
+    if is_previous_copy() {
+        note("background updater off - running as a kept-back copy");
+        return;
+    }
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(Duration::from_secs(FIRST_CHECK_SECS)).await;
         loop {
@@ -669,9 +752,14 @@ pub fn start(app: AppHandle) {
 /// Move the staged build into place and start it. Returns the error string to
 /// show; on success the caller must exit the process.
 ///
+/// `startup` says the swap was decided at launch rather than by the button. It
+/// only changes one thing - whether `--startup` is passed on to the new build -
+/// and that matters, because a launch-time swap happens during a logon, which
+/// is the situation the delay exists for.
+///
 /// Every failure path puts `WSight.exe` back. A user whose update failed still
 /// has a working app - what they must never get is a missing exe.
-pub fn apply() -> Result<(), String> {
+pub fn apply(startup: bool) -> Result<(), String> {
     let exe = exe_path().ok_or("无法定位当前程序")?;
     let dir = exe
         .parent()
@@ -690,7 +778,10 @@ pub fn apply() -> Result<(), String> {
         std::fs::copy(&staged, &beside).map_err(|e| format!("无法把更新包放到程序目录: {e}"))?;
     }
 
-    let previous = dir.join(format!("WSight.exe{OLD_PREFIX}{}", current_version()));
+    // The build we step aside to, and the one our successor must leave alone.
+    // Clearing the name first keeps one copy even if a stale one is somehow
+    // there under our own version number.
+    let previous = previous_path(current_version());
     let _ = std::fs::remove_file(&previous);
 
     // 1. Step aside. Until this succeeds nothing has changed.
@@ -704,50 +795,69 @@ pub fn apply() -> Result<(), String> {
     }
 
     // 3. Start it. `--handover` tells it to wait for our mutex instead of
-    //    exiting as a duplicate; `--replaced` names the file it should delete.
-    let spawned = std::process::Command::new(&exe)
-        .arg("--handover")
-        .arg("--replaced")
-        .arg(&previous)
-        .spawn();
+    //    exiting as a duplicate; `--replaced` names the build it inherits the
+    //    job of cleaning up after.
+    let mut spawn = std::process::Command::new(&exe);
+    spawn.arg("--handover").arg("--replaced").arg(&previous);
+    if startup {
+        spawn.arg("--startup");
+    }
 
-    if let Err(e) = spawned {
+    if let Err(e) = spawn.spawn() {
         // Put everything back the way it was.
         let _ = std::fs::rename(&exe, &beside);
         let _ = std::fs::rename(&previous, &exe);
         return Err(format!("无法启动新版本，已恢复原程序: {e}"));
     }
 
+    // The staged version is the running version now, so keeping the record
+    // would have the next launch reporting a download that is not there.
+    // Harmless - every reader checks the file too - but it is a lie that costs
+    // nothing to avoid. Written last, once nothing above can still be undone.
+    let mut cfg = config::load();
+    if !cfg.update_staged_version.is_empty() {
+        cfg.update_staged_version.clear();
+        let _ = config::save(&cfg);
+    }
+
     Ok(())
 }
 
-/// Delete the build this process replaced, plus any leftovers from earlier
-/// updates that never got the chance.
+/// Delete older builds that earlier updates left behind - all but one.
 ///
-/// Only ever touches `WSight.exe.old-*` beside our own exe - names this updater
-/// invents and nothing else produces, so a sweep cannot hit a file the user
-/// put there. (A broader `*.exe` sweep could, which is why it is not done.)
+/// The exception is `replaced`, the build this process just took over from, and
+/// it is kept deliberately: if this build will not start, that file is the only
+/// way back the user has, since there is no window left to put a button in.
+/// Keeping every leftover would grow the folder by a whole build per release,
+/// so the rule is one generation - this runs at every handover, so the copy
+/// kept by the update before last is deleted by the update after next.
+///
+/// Only ever touches names this updater invents: `WSight-old-<version>.exe`,
+/// plus the `WSight.exe.old-` form it used before the name had to be runnable.
+/// A sweep can therefore never hit a file the user put in the folder.
 pub fn clean_up(replaced: &str) {
-    if !replaced.is_empty() {
-        let path = PathBuf::from(replaced);
-        if path.exists() {
-            let _ = std::fs::remove_file(&path);
-        }
-    }
     let Some(dir) = exe_path().and_then(|p| p.parent().map(Path::to_path_buf)) else {
         return;
     };
+    let keep = PathBuf::from(replaced)
+        .file_name()
+        .map(|n| n.to_os_string());
+
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return;
     };
     for entry in entries.flatten() {
         let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.starts_with("WSight.exe.old-") {
-            // Fails while an older process is still shutting down; the next
-            // launch tries again, so this is not worth reporting.
-            let _ = std::fs::remove_file(entry.path());
+        let text = name.to_string_lossy();
+        if !(is_previous_name(&text) || text.starts_with(LEGACY_OLD_PREFIX)) {
+            continue;
         }
+        if keep.as_deref() == Some(name.as_os_str()) {
+            continue;
+        }
+        // Fails while an older process is still shutting down; the next launch
+        // tries again, so this is not worth reporting.
+        let _ = std::fs::remove_file(entry.path());
     }
 }
 
@@ -806,6 +916,30 @@ mod tests {
         let staged = staged_path();
         assert!(staged.to_string_lossy().ends_with("WSight.exe.new"));
         assert_ne!(staged, exe_path().unwrap_or_default());
+    }
+
+    #[test]
+    fn the_kept_back_copy_is_a_name_windows_will_run() {
+        // The whole point of this file is that it can be double-clicked at the
+        // one moment there is no window to offer a button from. `.exe` is not
+        // decoration.
+        assert_eq!(previous_name("0.5.0"), "WSight-old-0.5.0.exe");
+        assert!(previous_name("0.5.0").ends_with(".exe"));
+    }
+
+    #[test]
+    fn the_sweep_only_recognises_its_own_leftovers() {
+        assert!(is_previous_name("WSight-old-0.5.0.exe"));
+        assert!(is_previous_name("WSight-old-0.4.5.exe"));
+        // Ours, from the naming this replaced - swept so it cannot pile up.
+        assert!("WSight.exe.old-0.5.0".starts_with(LEGACY_OLD_PREFIX));
+        // Not ours. A pattern that matched these would let an update delete a
+        // file the user put in the folder.
+        assert!(!is_previous_name("WSight.exe"));
+        assert!(!is_previous_name("WSight.exe.new"));
+        assert!(!is_previous_name("WSight-old-.exe"));
+        assert!(!is_previous_name("WSight-old-0.5.0.exe.bak"));
+        assert!(!is_previous_name("Backup-of-WSight.exe"));
     }
 
     #[test]

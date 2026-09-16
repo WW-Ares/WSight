@@ -19,11 +19,17 @@ fn main() {
     // The three ways this process can come into being. `--handover` is the
     // self-updater's, and it is the only one that must not refuse to start when
     // another WSight is still running - see below.
+    //
+    // The two flags are independent on purpose: a launch-time update hands over
+    // at logon, so the build that takes over is a handover *and* an auto-start,
+    // and it needs the delay below for the same reason any logon launch does.
+    // Making `--startup` conditional on `--handover` being absent would have new
+    // loads in exactly the window the delay exists to avoid.
     let handover = has("--handover");
-    let startup = !handover && has("--startup");
+    let startup = has("--startup");
 
-    // Set by the updater together with `--handover`: the path of the old exe it
-    // stepped aside, which is ours to delete once its process is gone.
+    // Set by the updater together with `--handover`: the build it stepped
+    // aside, which is ours to decide the fate of once its process is gone.
     let replaced = args
         .iter()
         .position(|a| a == "--replaced")
@@ -32,7 +38,8 @@ fn main() {
         .unwrap_or_default();
 
     wsight_lib::log_launch(match (handover, startup) {
-        (true, _) => "launch (handover)",
+        (true, true) => "launch (handover, auto-start)",
+        (true, false) => "launch (handover)",
         (false, true) => "launch (auto-start)",
         _ => "launch (manual)",
     });
@@ -54,6 +61,16 @@ fn main() {
         // is just as redundant as one started right away.
         if !wsight_lib::claim_instance() {
             wsight_lib::log_launch("another instance already running - exiting");
+            return;
+        }
+        // A verified update is already sitting on disk. Install it now, while
+        // there is no window on screen and nothing to lose, and let the new
+        // build take over - the user's next launch is simply the new version.
+        //
+        // The mutex is taken first on purpose: renaming our own exe out from
+        // under a live instance is not something to do casually, and the
+        // handover the new build performs assumes it is the only one waiting.
+        if wsight_lib::auto_apply_staged(startup) {
             return;
         }
     }

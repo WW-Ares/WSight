@@ -54,9 +54,43 @@ pub fn await_instance() -> bool {
     single_instance::wait_for_release(Duration::from_secs(updater::HANDOVER_WAIT_SECS))
 }
 
-/// Delete the exe the updater stepped aside, plus any earlier leftovers.
+/// Delete the builds earlier updates stepped aside, keeping the most recent.
 pub fn clean_up_replaced(replaced: &str) {
     updater::clean_up(replaced);
+}
+
+/// Install an update that is already downloaded, before any window exists.
+///
+/// Returns true when the swap happened and this process should end, leaving the
+/// new build to take over. This is the path that makes updates actually reach
+/// people: the settings window has a 重启更新 button for a user who wants the
+/// new build now, but a desktop widget's settings window is opened roughly
+/// never, so on its own that button leaves a verified update sitting on disk
+/// forever.
+///
+/// `startup` is forwarded to the new build so a logon-time swap keeps the logon
+/// delay - which is the moment this runs most often.
+pub fn auto_apply_staged(startup: bool) -> bool {
+    if !updater::staged_ready() {
+        return false;
+    }
+    if updater::is_previous_copy() {
+        // A kept-back copy must not install anything - see `updater::check`.
+        log_launch("auto-apply: kept-back copy - skipped");
+        return false;
+    }
+    match updater::apply(startup) {
+        Ok(()) => {
+            log_launch("auto-apply: staged update installed, handing over");
+            true
+        }
+        Err(message) => {
+            // Falling through is right: the old build still works, the staged
+            // file is still there, and the user can retry from the button.
+            log_launch(&format!("auto-apply: failed - {message}"));
+            false
+        }
+    }
 }
 
 // ---------------------------------------------------------------- helpers
@@ -1024,7 +1058,9 @@ async fn check_update(app: AppHandle, manual: Option<bool>) -> updater::UpdateSt
 /// the call returns - the reply is for the failure case only.
 #[tauri::command]
 fn apply_update(app: AppHandle) -> Result<(), String> {
-    updater::apply()?;
+    // `false`: the user asked for this from a settings window, so it is not a
+    // logon launch and the new build has no start-up delay to inherit.
+    updater::apply(false)?;
     // The replacement is running and is waiting on our mutex, which we release
     // by dying. Nothing else here is worth finishing.
     app.exit(0);
