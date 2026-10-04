@@ -110,14 +110,48 @@ export function formatClock(liveMhz: number, ratedMhz: number): string {
   return `${(liveMhz / 1000).toFixed(2)}/${rated}GHz`;
 }
 
+/**
+ * How long the machine has been up, in Chinese.
+ *
+ * The weather card had the opposite problem - it showed a raw observation
+ * timestamp that lags real time by 5-20 minutes - so both headers were moved
+ * onto one convention: the header says something about *this* moment in
+ * plain language, and never prints a wall-clock reading that can be compared
+ * against the taskbar and found wanting.
+ *
+ * Minutes are dropped once days appear (`2 天 3 小时`, not `2 天 3 小时 42
+ * 分钟`): the header is 300 design px wide and the extra figures buy nothing.
+ */
 export function formatUptime(totalSeconds: number): string {
-  if (!Number.isFinite(totalSeconds) || totalSeconds <= 0) return "--";
+  if (!Number.isFinite(totalSeconds) || totalSeconds < 0) return "--";
   const days = Math.floor(totalSeconds / 86400);
   const hours = Math.floor((totalSeconds % 86400) / 3600);
   const minutes = Math.floor((totalSeconds % 3600) / 60);
-  if (days > 0) return `${days}d ${hours}h`;
-  if (hours > 0) return `${hours}h ${minutes}m`;
-  return `${minutes}m`;
+  if (days > 0) return `${days} 天 ${hours} 小时`;
+  if (hours > 0) return `${hours} 小时 ${minutes} 分钟`;
+  if (minutes > 0) return `${minutes} 分钟`;
+  return "刚刚启动";
+}
+
+/**
+ * Age of a cache entry as `X 分钟前更新`.
+ *
+ * Deliberately *not* a wall-clock stamp. The payload on screen was written
+ * `Date.now() - cachedAtMs` ago, and saying so in relative terms is the only
+ * phrasing that cannot drift out of step with the system clock.
+ *
+ * `cachedAtMs` of 0 means "never written" and yields an empty string so the
+ * caller can leave the slot blank rather than claim "刚刚更新" about a payload
+ * that does not exist yet.
+ */
+export function formatRelativeAge(ageMs: number): string {
+  if (!Number.isFinite(ageMs) || ageMs < 0) return "";
+  const minutes = Math.floor(ageMs / 60000);
+  if (minutes <= 0) return "刚刚更新";
+  if (minutes < 60) return `${minutes} 分钟前更新`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} 小时前更新`;
+  return `${Math.floor(hours / 24)} 天前更新`;
 }
 
 /** C2D-style rate colour: distinct hues so up/down are readable at a glance. */

@@ -259,8 +259,18 @@
   }
 }
 
+/* "3 分钟前更新": how old the payload on screen is, counted upwards.
+   10px rather than the header's 11px so the city name keeps its prominence -
+   the age is a footnote to the reading, not the other way round. `tabular-nums`
+   stops the line from twitching as the number grows a digit. */
+.wx-fresh {
+  font-size: 10px;
+  color: var(--fg-dim);
+  font-variant-numeric: tabular-nums;
+}
+
 /* Dimmed once the payload on screen is older than WEATHER_STALE_MS. */
-.wx-stamp.is-stale {
+.wx-fresh.is-stale {
   color: var(--fg-faint);
 }
 

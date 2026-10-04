@@ -6,6 +6,7 @@ import {
   type ReactNode,
 } from "react";
 import { api, onWeather, onWeatherError } from "../shared/api";
+import { formatRelativeAge } from "../shared/format";
 import { useLiveConfig } from "../shared/useLiveConfig";
 import { useStage } from "../shared/uiScale";
 import { WidgetFrame } from "../shared/WidgetFrame";
@@ -32,12 +33,6 @@ function weekdayLabel(fxDate: string, index: number): string {
   const d = new Date(`${fxDate}T00:00:00`);
   if (Number.isNaN(d.getTime())) return fxDate;
   return ["周日", "周一", "周二", "周三", "周四", "周五", "周六"][d.getDay()];
-}
-
-/** "2026-09-14T17:13+08:00" -> "2026-09-14 17:13" */
-function obsStamp(obsTime: string): string {
-  if (!obsTime || obsTime.length < 16) return "";
-  return `${obsTime.slice(0, 10)} ${obsTime.slice(11, 16)}`;
 }
 
 /**
@@ -235,6 +230,23 @@ export function WeatherPanel({ config }: { config: AppConfig }) {
   const [cachedAt, setCachedAt] = useState(0);
   /** true while a network refresh is in flight (the header shows a dot) */
   const [refreshing, setRefreshing] = useState(true);
+  /**
+   * Seconds since epoch, re-read once a second.
+   *
+   * The header counts the age of the payload upwards ("3 分钟前更新"), and
+   * nothing else on the card changes with the clock, so this is the only thing
+   * that has to tick. It deliberately holds the raw seconds rather than the
+   * rendered string: re-rendering on a second boundary that cannot change the
+   * text (`刚刚更新` spans sixty of them) would repaint the card for nothing.
+   */
+  const [nowSec, setNowSec] = useState(() => Date.now() / 1000);
+  useEffect(() => {
+    const timer = window.setInterval(
+      () => setNowSec(Date.now() / 1000),
+      1000,
+    );
+    return () => window.clearInterval(timer);
+  }, []);
 
   /**
    * Advance width of the `°` glyph, measured rather than guessed.
@@ -404,9 +416,11 @@ export function WeatherPanel({ config }: { config: AppConfig }) {
   const adviceLines = wrapAdvice(data.advice?.text ?? "");
 
   // A payload older than half an hour is still shown - it beats an empty card
-  // when the network is down - but its timestamp is dimmed so it cannot be
-  // mistaken for a live reading.
-  const stale = cachedAt > 0 && Date.now() - cachedAt > WEATHER_STALE_MS;
+  // when the network is down - but the age line is dimmed so it cannot be
+  // mistaken for a fresh reading. Both the age and this threshold read the
+  // same clock, so the two can never disagree about how old the card is.
+  const ageMs = cachedAt > 0 ? nowSec * 1000 - cachedAt : 0;
+  const stale = cachedAt > 0 && ageMs > WEATHER_STALE_MS;
   const sub = refreshing ? (
     <span className="wx-updating">
       <i className="wx-dot" />
@@ -415,8 +429,8 @@ export function WeatherPanel({ config }: { config: AppConfig }) {
   ) : error ? (
     "更新失败"
   ) : (
-    <span className={stale ? "wx-stamp is-stale" : "wx-stamp"}>
-      {obsStamp(now.obsTime)}
+    <span className={stale ? "wx-fresh is-stale" : "wx-fresh"}>
+      {formatRelativeAge(ageMs)}
     </span>
   );
 
