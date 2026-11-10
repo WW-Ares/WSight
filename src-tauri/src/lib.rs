@@ -10,7 +10,7 @@ mod single_instance;
 mod updater;
 mod weather;
 
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -389,11 +389,6 @@ static ON_TOP_WEATHER: AtomicBool = AtomicBool::new(false);
 static TEMP_TOP_MONITOR: AtomicBool = AtomicBool::new(false);
 static TEMP_TOP_WEATHER: AtomicBool = AtomicBool::new(false);
 
-/// 连续多少轮"桌面已经收回去了"。连中两轮才落回，避免 Win+D 切换途中的
-/// 一帧抖动把窗口按到桌面底下再抬起来。
-static DESKTOP_GONE_MONITOR: AtomicU32 = AtomicU32::new(0);
-static DESKTOP_GONE_WEATHER: AtomicU32 = AtomicU32::new(0);
-
 /// Windows-only counterpart of the block above: there is no portable version of
 /// "a tool window that ignores activation and still shows after 显示桌面", so
 /// every other platform gets no-ops.
@@ -412,12 +407,17 @@ mod desktop {
     pub fn is_topmost(_win: &WebviewWindow) -> bool {
         false
     }
-    pub fn place_at_desktop_level(_win: &WebviewWindow, _ignore: &[isize]) {}
-    pub fn floats_above_apps(_win: &WebviewWindow) -> bool {
+    pub fn place_at_desktop_level(_win: &WebviewWindow, _ignore: &[isize]) -> bool {
         false
     }
     pub fn desktop_on_top(_ignore: &[isize]) -> bool {
         false
+    }
+    pub fn desktop_showing(_ignore: &[isize]) -> bool {
+        false
+    }
+    pub fn foreground_class() -> String {
+        String::new()
     }
     pub fn to_bottom(_win: &WebviewWindow) {}
     pub fn watch_foreground(_sink: fn(bool)) {}
@@ -463,13 +463,6 @@ fn temp_top_flag(label: &str) -> &'static AtomicBool {
     }
 }
 
-fn desktop_gone_counter(label: &str) -> &'static AtomicU32 {
-    match label {
-        "monitor" => &DESKTOP_GONE_MONITOR,
-        _ => &DESKTOP_GONE_WEATHER,
-    }
-}
-
 /// Put a widget at the level its 置顶 setting asks for: floating above
 /// everything, or tucked under every ordinary window.
 ///
@@ -487,7 +480,6 @@ fn apply_widget_level(win: &tauri::WebviewWindow, on_top: bool) {
         on_top_flag(&label).store(on_top, Ordering::Relaxed);
         // 用户（或配置）已经明确指定层级了，临时置顶那一页翻过去。
         temp_top_flag(&label).store(false, Ordering::Relaxed);
-        desktop_gone_counter(&label).store(0, Ordering::Relaxed);
     }
     desktop::mark_as_tool(win);
     // 调整 mode needs the keyboard, so activation is allowed only there.
@@ -506,9 +498,9 @@ fn apply_widget_level(win: &tauri::WebviewWindow, on_top: bool) {
 /// 两张卡片都停在桌面正上方，互为邻居。不排掉的话，各自的 `place_at_desktop_level`
 /// 都会把对方当成"挡在桌面之上的那个窗口"，于是把自己搬到对方下面，再来一轮 ——
 /// 每次搬运都是一次重合成，连着几十次就是肉眼可见的持续轻闪。
-fn place_widget_level(win: &tauri::WebviewWindow) {
+fn place_widget_level(win: &tauri::WebviewWindow) -> bool {
     let mine = widget_hwnds(win.app_handle());
-    desktop::place_at_desktop_level(win, &mine);
+    desktop::place_at_desktop_level(win, &mine)
 }
 
 /// Apply the remembered 置顶 choice and the locked-by-default state.
@@ -533,10 +525,38 @@ static APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
 ///
 /// 全程只用 `SetWindowPos`，不碰 tao 的 `set_always_on_top`：后者切完 z 序会
 /// `InvalidateRgn` 让整窗重绘，`Win+D` 两头都会因此闪一帧。
+/// 落回日志的节流：同一张卡片 2 秒内只写一条。
+///
+/// 这条日志只在"真挪了"时触发，正常情况下切换一次就一条。可一旦哪天又出现
+/// "清不掉"的现场，250ms 一轮会把 launch.log 刷满，反而看不到更早的线索。
+fn drop_log_due(label: &str) -> bool {
+    static LAST: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+    let slot = if label == "monitor" { 0 } else { 1 };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let last = LAST[slot].load(Ordering::Relaxed);
+    if now.saturating_sub(last) < 2000 {
+        return false;
+    }
+    LAST[slot].store(now, Ordering::Relaxed);
+    true
+}
+
 fn raise_temp_topmost(win: &tauri::WebviewWindow) {
-    desktop::set_topmost(win);
     desktop::mark_as_tool(win);
     desktop::set_no_activate(win, true);
+    // 已经在置顶层就别再调 `SetWindowPos`：每次都是一次重合成，连点两下桌面
+    // 就是四次无谓的重绘（`is_topmost` 看的是窗口上的实际样式位）。
+    if !desktop::is_topmost(win) {
+        desktop::set_topmost(win);
+        launchlog::log(&format!(
+            "z: {} 临时置顶（前台={}）",
+            win.label(),
+            desktop::foreground_class(),
+        ));
+    }
 }
 
 /// 桌面收起，让窗口跟着桌面落回桌面层。
@@ -551,6 +571,14 @@ fn raise_temp_topmost(win: &tauri::WebviewWindow) {
 fn drop_temp_topmost(win: tauri::WebviewWindow) {
     std::thread::spawn(move || {
         for _ in 0..22 {
+            // 桌面又回到前台了（`Win+D` 连按、桌面动画回弹、钩子给了两拍相反的
+            // 前台事件）：这一步**必须放手**。落回会真的把卡片摘出置顶层，摘完
+            // 桌面还在前台就是实打实地被盖住，等下一轮抬高又是一次可见的闪。
+            let mine = widget_hwnds(win.app_handle());
+            if desktop::desktop_showing(&mine) {
+                temp_top_flag(win.label()).store(true, Ordering::Relaxed);
+                return;
+            }
             place_widget_level(&win);
             std::thread::sleep(Duration::from_millis(12));
         }
@@ -610,7 +638,6 @@ fn raise_for_desktop(app: &AppHandle, label: &str) {
     if let Some(win) = app.get_webview_window(label) {
         raise_temp_topmost(&win);
         temp_top_flag(label).store(true, Ordering::Relaxed);
-        desktop_gone_counter(label).store(0, Ordering::Relaxed);
     }
 }
 
@@ -725,7 +752,8 @@ fn spawn_widget_guard(app: AppHandle) {
                 }
             }
         }
-        let desktop_up = desktop::desktop_on_top(&mine);
+        // 一次算好，两个卡片共用：桌面是不是真的占着前台（前台是桌面 + 桌面在栈顶）。
+        let desktop_front = desktop::desktop_showing(&mine);
 
         for label in ["monitor", "weather"] {
             if !wants_visible(label).load(Ordering::Relaxed) || is_adjusting(label) {
@@ -743,47 +771,34 @@ fn spawn_widget_guard(app: AppHandle) {
                 continue;
             }
 
-            let counter = desktop_gone_counter(label);
-
-            // 桌面不在前面，卡片身上却挂着 `WS_EX_TOPMOST`，而且不是我们记在
-            // 「临时置顶」账上的 —— 这是残留。全屏程序、shell 动画、丢掉的落回
-            // 事件都会留下它，而置顶的卡片就压在用户眼前的程序上，直到下一次
-            // 什么事件把它撞下来（"被卡片压在下面几秒"）。只认窗口上的实际样式位。
-            if !desktop_up
-                && !temp_top_flag(label).load(Ordering::Relaxed)
-                && desktop::is_topmost(&win)
-            {
-                place_widget_level(&win);
-                counter.store(0, Ordering::Relaxed);
-                continue;
-            }
-
-            if desktop_up {
-                // 桌面在最前面（Win+D）：卡片不置顶就会被它盖住。
+            // 只有两种情况允许卡片待在置顶层：
+            //   ① 桌面**真的盖住了它**（像素命中，硬证据）；
+            //   ② 桌面占着前台（前台是桌面，且桌面在普通窗口栈顶）。
+            // ② 里的"前台"这一条是 2026-11-11 补的：全屏预览器会把自己抬成置顶、
+            // 标题还可能为空，`desktop_on_top` 把它们整排跳过，只按 z 序会得出
+            // "桌面还在最前面"的假答案，于是卡片被一直续着置顶，压在用户刚恢复的
+            // 预览器上。前台窗口不会骗人 —— 用户正在用的那个窗口才在前台。
+            if desktop::covered_by_desktop(&win) || desktop_front {
                 if !temp_top_flag(label).load(Ordering::Relaxed) {
                     raise_temp_topmost(&win);
                     temp_top_flag(label).store(true, Ordering::Relaxed);
                 }
-                counter.store(0, Ordering::Relaxed);
                 continue;
             }
 
-            // 桌面不在前面了：卡片必须落在桌面层。压着普通程序就**立刻**落回，
-            // 不等第二轮 —— 那一轮就是半秒，用户看到的是"卡片压着全屏窗口"。
-            if desktop::floats_above_apps(&win) {
-                temp_top_flag(label).store(false, Ordering::Relaxed);
-                place_widget_level(&win);
-                counter.store(0, Ordering::Relaxed);
-                continue;
-            }
-
-            if temp_top_flag(label).load(Ordering::Relaxed) {
-                // 抬过、但桌面已经收起且没压着谁：连中两轮才落回，避开切换途中
-                // 那一帧抖动把窗口按到桌面底下再抬起来。
-                if counter.fetch_add(1, Ordering::Relaxed) + 1 >= 2 {
-                    temp_top_flag(label).store(false, Ordering::Relaxed);
-                    drop_temp_topmost(win);
-                }
+            // 其余情况：卡片必须贴在桌面层。`place_at_desktop_level` 是幂等的
+            // （已经在那儿就什么都不做），所以这里不用再看"高不高""要不要等两轮"——
+            // 那种延时正是"卡片压着程序过了半秒"的来源。残留的 WS_EX_TOPMOST、
+            // 被点击顶上去、恢复动画留下的半空位置，都会在这一步被一起收回来
+            // （插到普通窗口下面会自动摘掉置顶位）。
+            temp_top_flag(label).store(false, Ordering::Relaxed);
+            if place_widget_level(&win) && drop_log_due(label) {
+                launchlog::log(&format!(
+                    "z: {label} 落回桌面层（前台={} 置顶={} 桌面在前={})",
+                    desktop::foreground_class(),
+                    desktop::is_topmost(&win),
+                    desktop_front,
+                ));
             }
         }
     });

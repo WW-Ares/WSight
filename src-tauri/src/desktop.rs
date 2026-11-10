@@ -29,6 +29,7 @@ const WS_EX_TOPMOST: isize = 0x0000_0008;
 
 const HWND_BOTTOM: isize = 1;
 const HWND_TOPMOST: isize = -1;
+const HWND_NOTOPMOST: isize = -2;
 const GW_HWNDNEXT: u32 = 2;
 const SWP_NOSIZE: u32 = 0x0001;
 const SWP_NOMOVE: u32 = 0x0002;
@@ -88,6 +89,7 @@ extern "system" {
     fn IsWindowVisible(hwnd: *mut c_void) -> i32;
     fn IsIconic(hwnd: *mut c_void) -> i32;
     fn GetTopWindow(hwnd: *mut c_void) -> *mut c_void;
+    fn GetForegroundWindow() -> *mut c_void;
     fn GetWindow(hwnd: *mut c_void, cmd: u32) -> *mut c_void;
     fn GetWindowTextLengthW(hwnd: *mut c_void) -> i32;
     fn SetWinEventHook(
@@ -241,13 +243,53 @@ pub fn desktop_on_top(ignore: &[isize]) -> bool {
             )
         };
         let mine = ignore.iter().any(|x| *x == h as isize);
-        if visible && !mine && has_title && ex & WS_EX_TOPMOST == 0 {
-            return matches!(class_name(h).as_str(), "Progman" | "WorkerW");
+        if visible && !mine && has_title {
+            // 桌面按类名相认，**不看它自己的置顶位**：Win+D 之后 `Progman` 常被
+            // 留在置顶层，按"跳过置顶窗口"走就永远遇不到它，"桌面在最前面"
+            // 这个判断会一直是 false —— 这才是恢复后卡片不肯落回的源头。
+            if matches!(class_name(h).as_str(), "Progman" | "WorkerW") {
+                return true;
+            }
+            // 置顶层的有标题窗口是浮层 / 置顶程序，跳过继续往下找。
+            if ex & WS_EX_TOPMOST == 0 {
+                return false;
+            }
         }
         // SAFETY: 同上，沿着 z 序往下走一格。
         h = unsafe { GetWindow(h, GW_HWNDNEXT) };
     }
     false
+}
+
+/// 前台窗口的类名，只给日志用。
+pub fn foreground_class() -> String {
+    // SAFETY: 只读查询。
+    let fg = unsafe { GetForegroundWindow() };
+    if fg.is_null() {
+        return String::from("-");
+    }
+    class_name(fg)
+}
+
+/// 桌面此刻是不是真的**占着前台**——用户正在看的那一层就是桌面。
+///
+/// 只看 z 序会被"全屏 / 置顶的程序"骗：那类窗口不在普通层里（预览器一进全屏就把
+/// 自己抬成置顶、标题还可能为空），`desktop_on_top` 会把它们整排跳过，一路走到
+/// `Progman`，得出"桌面还在最前面"的结论。于是守护线程不停地给卡片续临时置顶，
+/// 卡片就一直压在用户刚恢复的那个预览器上面 —— 这就是"被卡片压住几秒"。
+///
+/// 前台窗口是唯一不会骗人的信号：真正在用的那个窗口才在前台。所以判据是
+/// 「前台就是桌面」**且**「桌面确实盖在所有普通窗口之上」。
+pub fn desktop_showing(ignore: &[isize]) -> bool {
+    // SAFETY: 只读查询。
+    let fg = unsafe { GetForegroundWindow() };
+    if fg.is_null() || ignore.iter().any(|x| *x == fg as isize) {
+        return false;
+    }
+    if !matches!(class_name(fg).as_str(), "Progman" | "WorkerW") {
+        return false;
+    }
+    desktop_on_top(ignore)
 }
 
 /// 抬到置顶层 —— **只在桌面把窗口盖住的那一瞬间用**。
@@ -291,28 +333,29 @@ fn desktop_slot(
     ignore: &[isize],
 ) -> Option<(*mut c_void, *mut c_void, bool)> {
     for wanted in ["Progman", "WorkerW"] {
-        // 从栈顶往下走。跳过的只有隐藏窗口和置顶窗口：后者是任务栏、输入法
+        // 从栈顶往下走。锚点只认普通层窗口：置顶的那一拨是任务栏、输入法
         // 这类浮层，把卡片插到它们下面会让卡片也变成置顶的。
         let mut h = unsafe { GetTopWindow(std::ptr::null_mut()) };
         let mut anchor: *mut c_void = std::ptr::null_mut();
-        let mut seen_self = false;
-        let mut clean_below_self = true;
         while !h.is_null() {
             // SAFETY: 全部只读查询，h 来自上面的 z 序枚举。
-            let (visible, ex) =
-                unsafe { (IsWindowVisible(h) != 0, GetWindowLongPtrW(h, GWL_EXSTYLE)) };
-            if visible && ex & WS_EX_TOPMOST == 0 {
+            let visible = unsafe { IsWindowVisible(h) != 0 };
+            if visible {
+                // **桌面按类名相认，不看它自己的置顶位。** Win+D 之后 Explorer
+                // 常把 `Progman` 留在置顶层（现场 `.verify/diag_live_z.py`：
+                // Progman top=Y 却排在栈底）。这个位是残留、不影响显示，但按
+                // \"跳过置顶窗口\"的规则去找桌面就再也找不到 —— 于是落位退化成
+                // `to_bottom`，而 `HWND_BOTTOM` 对置顶窗口完全无效：卡片留在
+                // 置顶层压着用户刚恢复的程序，守护线程每 250ms 白试一次。
                 if class_name(h) == wanted {
-                    return Some((h, anchor, seen_self && clean_below_self));
+                    let placed = !is_topmost_hwnd(hwnd) && sits_on_desktop(hwnd, h, ignore);
+                    return Some((h, anchor, placed));
                 }
-                if h == hwnd {
-                    seen_self = true;
-                } else if !ignore.iter().any(|x| *x == h as isize) {
-                    // 我自己和我的同伙都不当锚点，也都不算"挡在我下面"。
+                if h != hwnd
+                    && !is_topmost_hwnd(h)
+                    && !ignore.iter().any(|x| *x == h as isize)
+                {
                     anchor = h;
-                    if seen_self {
-                        clean_below_self = false;
-                    }
                 }
             }
             // SAFETY: 沿着 z 序往下走一格。
@@ -320,6 +363,32 @@ fn desktop_slot(
         }
     }
     None
+}
+
+/// 卡片（普通层）正下方第一个能看见的窗口是不是桌面 —— 即「紧贴桌面上方」。
+///
+/// 同进程的另一张卡片跳过：它俩互为邻居，谁在下面都不算挡路。
+fn sits_on_desktop(hwnd: *mut c_void, desktop: *mut c_void, ignore: &[isize]) -> bool {
+    let mut h = unsafe { GetWindow(hwnd, GW_HWNDNEXT) };
+    while !h.is_null() {
+        // SAFETY: 只读查询，沿 z 序往下走。
+        if unsafe { IsWindowVisible(h) != 0 } {
+            if h == desktop {
+                return true;
+            }
+            if !ignore.iter().any(|x| *x == h as isize) {
+                return false;
+            }
+        }
+        // SAFETY: 同上。
+        h = unsafe { GetWindow(h, GW_HWNDNEXT) };
+    }
+    false
+}
+
+fn is_topmost_hwnd(hwnd: *mut c_void) -> bool {
+    // SAFETY: 只读查询。
+    unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST != 0 }
 }
 
 /// 把窗口放回"桌面家具"该在的那一层 —— **紧贴桌面上方**。
@@ -331,23 +400,52 @@ fn desktop_slot(
 /// 插到"桌面上方那个窗口"的下面，位置就与桌面同步：桌面在半空时卡片在它正
 /// 上方，桌面落地时卡片仍在它正上方，永远不会被桌面盖住。
 ///
-/// 顺带解决了另一个问题：`SetWindowPos` 的目标是普通层窗口，置顶的窗口会被
-/// 自动摘掉 `WS_EX_TOPMOST`，退出置顶和重新定位合并成一次调用，中间不会出现
-/// "已退出置顶但还在最上面"的合成帧。
-pub fn place_at_desktop_level(win: &WebviewWindow, ignore: &[isize]) {
+/// 落位前要自己把 `WS_EX_TOPMOST` 摘掉 —— 别指望"插到普通窗口下面"能顺带清位，
+/// 实测那样只会把置顶窗口摆到置顶层内部靠下的位置（见函数里的注释）。
+pub fn place_at_desktop_level(win: &WebviewWindow, ignore: &[isize]) -> bool {
     let Some(hwnd) = handle(win) else {
-        return;
+        return false;
     };
-    let Some((_desktop, anchor, placed)) = desktop_slot(hwnd, ignore) else {
-        // 找不到桌面（极少见）：退回原来的最底层。
-        to_bottom(win);
-        return;
-    };
-    // 已经贴在桌面正上方了，不用再动。挪一下只会多一次重合成。
-    if placed {
-        return;
+    let was_top = is_topmost_hwnd(hwnd);
+    // 桌面正占着前台（`Win+D` 还没收起）时不许摘置顶位：摘了就是交给桌面盖住。
+    // 这种时候"卡片在置顶层"是正确状态，抬高那条路会负责记账。
+    if was_top && desktop_showing(ignore) {
+        return false;
     }
-    // SAFETY: 只改 z 序；`HWND_TOP` 是空指针。
+    let Some((_desktop, anchor, placed)) = desktop_slot(hwnd, ignore) else {
+        // 找不到桌面（极少见）：退回原来的最底层，至少把置顶位摘掉。
+        to_bottom(win);
+        return true;
+    };
+    // 已经贴在桌面正上方、也没挂着置顶位，不用再动。挪一下只会多一次重合成。
+    if placed && !was_top {
+        return false;
+    }
+    // **摘置顶位必须显式做。** 实测（`.verify/verify_untopmost.py`，Win11 26100）：
+    // 把带 `WS_EX_TOPMOST` 的窗口 `SetWindowPos` 到普通窗口下面，Windows 只是把
+    // 它摆到置顶层内部靠下的位置，样式位原封不动 —— 卡片于是永远压在普通程序
+    // 之上，守护线程每 250ms 白落一次。先 `HWND_NOTOPMOST` 掉出置顶层，再按锚点
+    // 插入；两次调用在同一个 tick 里完成，DWM 合成时只会看到最终位置。
+    if was_top {
+        // SAFETY: 只改 z 序层级，不移动不激活。
+        unsafe {
+            SetWindowPos(
+                hwnd,
+                HWND_NOTOPMOST as *mut c_void,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER,
+            );
+        }
+    }
+    if anchor.is_null() || anchor == hwnd {
+        // 桌面上方没有任何普通窗口（`Win+D` 那一下）：没有位置可插，摘掉置顶位
+        // 就到这一步为止 —— 接着由"桌面占着前台"那条分支重新抬起来。
+        return was_top;
+    }
+    // SAFETY: 只改 z 序。
     unsafe {
         SetWindowPos(
             hwnd,
@@ -359,6 +457,7 @@ pub fn place_at_desktop_level(win: &WebviewWindow, ignore: &[isize]) {
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER,
         );
     }
+    true
 }
 
 /// 窗口身上现在挂着 `WS_EX_TOPMOST` 吗。
@@ -372,43 +471,6 @@ pub fn is_topmost(win: &WebviewWindow) -> bool {
     };
     // SAFETY: 只读查询。
     unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST != 0 }
-}
-
-/// 窗口是不是浮在某个普通窗口上面了（本该紧贴桌面，却压着别人）。
-///
-/// "上面有窗口"是正常的——卡片本来就该在所有程序下面。要查的是**下面**：
-/// 从卡片接着往栈底走，桌面之前如果还有普通的、有标题的窗口，说明卡片停在
-/// 半空，压着那个程序。桌面窗口本身不算（卡片就该在它上面）。
-pub fn floats_above_apps(win: &WebviewWindow) -> bool {
-    let Some(hwnd) = handle(win) else {
-        return false;
-    };
-    let mut h = unsafe { GetTopWindow(std::ptr::null_mut()) };
-    while !h.is_null() && h != hwnd {
-        h = unsafe { GetWindow(h, GW_HWNDNEXT) };
-    }
-    if h.is_null() {
-        return false;
-    }
-    // SAFETY: 从卡片往下遍历，全部是只读查询。
-    unsafe {
-        h = GetWindow(h, GW_HWNDNEXT);
-        while !h.is_null() {
-            let (visible, ex, has_title) = (
-                IsWindowVisible(h) != 0,
-                GetWindowLongPtrW(h, GWL_EXSTYLE),
-                GetWindowTextLengthW(h) > 0,
-            );
-            if visible && ex & WS_EX_TOPMOST == 0 && has_title {
-                let cls = class_name(h);
-                if cls != "Progman" && cls != "WorkerW" {
-                    return true;
-                }
-            }
-            h = GetWindow(h, GW_HWNDNEXT);
-        }
-    }
-    false
 }
 
 /// 贴回窗口栈最底下（桌面家具的那一层）。
