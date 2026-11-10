@@ -42,6 +42,7 @@ const EVENT_SYSTEM_FOREGROUND: u32 = 0x0003;
 const WINEVENT_OUTOFCONTEXT: u32 = 0x0000;
 const WINEVENT_SKIPOWNPROCESS: u32 = 0x0002;
 
+#[derive(Clone, Copy)]
 #[repr(C)]
 struct Point {
     x: i32,
@@ -102,6 +103,14 @@ extern "system" {
     fn GetMessageW(msg: *mut Msg, hwnd: *mut c_void, min: u32, max: u32) -> i32;
     fn TranslateMessage(msg: *const Msg) -> i32;
     fn DispatchMessageW(msg: *const Msg) -> isize;
+    fn SetWindowsHookExW(
+        id_hook: i32,
+        proc: Option<unsafe extern "system" fn(i32, usize, isize) -> isize>,
+        module: *mut c_void,
+        thread_id: u32,
+    ) -> *mut c_void;
+    fn UnhookWindowsHookEx(hook: *mut c_void) -> i32;
+    fn CallNextHookEx(hook: *mut c_void, code: i32, w_param: usize, l_param: isize) -> isize;
 }
 
 fn handle(win: &WebviewWindow) -> Option<*mut c_void> {
@@ -450,6 +459,81 @@ pub fn watch_foreground(sink: fn(bool)) {
                 DispatchMessageW(&msg);
             }
             UnhookWinEvent(hook);
+        }
+    });
+}
+
+// ------------------------------------------------------------- click watching
+//
+// 右击弹出的菜单是网页里的一个浮层，收起它靠的是"窗口失去焦点"。可悬浮窗带着
+// `WS_EX_NOACTIVATE`（点它不抢焦点，见文件头第 2 点），于是它从来没有焦点可丢：
+// 点桌面、点任务栏、点别的程序，都不会产生 `blur`，菜单就那样一直挂在屏幕上。
+//
+// 底层鼠标钩子补上这个信号 —— 系统在把点击投递出去之前，会先问一遍所有
+// `WH_MOUSE_LL` 钩子，无论点是落在桌面、任务栏还是别的程序上都绕不过去。
+// 回调里只做一次 `WindowFromPoint` 和一次函数调用，不做任何阻塞动作。
+
+const WH_MOUSE_LL: i32 = 14;
+const WM_LBUTTONDOWN: u32 = 0x0201;
+const WM_RBUTTONDOWN: u32 = 0x0204;
+const WM_MBUTTONDOWN: u32 = 0x0207;
+
+/// `MSLLHOOKSTRUCT`；只读 `pt`，其余字段照原样占位。
+#[repr(C)]
+struct MsllHookStruct {
+    pt: Point,
+    mouse_data: u32,
+    flags: u32,
+    time: u32,
+    extra: usize,
+}
+
+static CLICK_SINK: OnceLock<fn(isize)> = OnceLock::new();
+
+unsafe extern "system" fn mouse_proc(code: i32, w_param: usize, l_param: isize) -> isize {
+    if code >= 0 && l_param != 0 {
+        let msg = w_param as u32;
+        if matches!(msg, WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN) {
+            // SAFETY: 底层钩子保证 code >= 0 时 l_param 指向一个 MSLLHOOKSTRUCT。
+            let info = &*(l_param as *const MsllHookStruct);
+            let hit = WindowFromPoint(info.pt);
+            let root = if hit.is_null() {
+                std::ptr::null_mut()
+            } else {
+                GetAncestor(hit, GA_ROOT)
+            };
+            if let Some(sink) = CLICK_SINK.get() {
+                sink(root as isize);
+            }
+        }
+    }
+    // SAFETY: 转交给链上的下一个钩子 —— 别的程序（输入法、手势工具）也可能在听鼠标。
+    CallNextHookEx(std::ptr::null_mut(), code, w_param, l_param)
+}
+
+/// 订阅"用户按下鼠标"。回调参数是被点中的**顶层**窗口句柄，由调用方判断这次
+/// 点击落在谁身上 —— 桌面、任务栏和别的程序各有各的句柄。
+///
+/// 钩子是全局的、进程外的（`WH_MOUSE_LL` 不需要注入），但系统对回调有超时限制，
+/// 所以这里只做只读查询；真正的处理放在订阅者那边（发一个事件给前端）。
+pub fn watch_click_outside(sink: fn(isize)) {
+    if CLICK_SINK.set(sink).is_err() {
+        return; // 已经订阅过了
+    }
+    std::thread::spawn(|| {
+        // SAFETY: 底层钩子的模块句柄传空是 WinXP 之后的正常写法；回调不碰任何
+        // 未初始化内存，也不阻塞系统投递。
+        unsafe {
+            let hook = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), std::ptr::null_mut(), 0);
+            if hook.is_null() {
+                return;
+            }
+            let mut msg = std::mem::zeroed::<Msg>();
+            while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+            UnhookWindowsHookEx(hook);
         }
     });
 }

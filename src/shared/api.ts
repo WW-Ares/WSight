@@ -15,6 +15,8 @@ export const SNAPSHOT_EVENT = "monitor://snapshot";
 export const WEATHER_EVENT = "weather://payload";
 export const WEATHER_ERROR_EVENT = "weather://error";
 export const CONFIG_EVENT = "config://changed";
+/** A mouse button went down anywhere; payload = which widget it hit, or "". */
+export const CLICK_OUTSIDE_EVENT = "widget-click-outside";
 
 export const api = {
   /** latest cached snapshot (null until the first sample lands) */
@@ -147,4 +149,16 @@ export function onWeatherError(cb: (msg: string) => void): Promise<UnlistenFn> {
 
 export function onConfig(cb: (c: AppConfig) => void): Promise<UnlistenFn> {
   return listen<AppConfig>(CONFIG_EVENT, (e) => cb(e.payload));
+}
+
+/**
+ * A mouse button went down somewhere on the system.
+ *
+ * The payload names the widget that was hit, or "" for a click that landed
+ * anywhere else (desktop, taskbar, another program). Widgets are built with
+ * `WS_EX_NOACTIVATE`, so a click outside never takes focus away and `blur`
+ * never fires - this is the only way the right-click menu learns to close.
+ */
+export function onClickOutside(cb: (hit: string) => void): Promise<UnlistenFn> {
+  return listen<string>(CLICK_OUTSIDE_EVENT, (e) => cb(e.payload));
 }

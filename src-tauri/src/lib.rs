@@ -418,6 +418,7 @@ mod desktop {
     }
     pub fn to_bottom(_win: &WebviewWindow) {}
     pub fn watch_foreground(_sink: fn(bool)) {}
+    pub fn watch_click_outside(_sink: fn(isize)) {}
 }
 
 fn adjusting_flag(label: &str) -> &'static AtomicBool {
@@ -543,32 +544,121 @@ fn drop_temp_topmost(win: tauri::WebviewWindow) {
     });
 }
 
+/// 两个悬浮窗的顶层句柄。
+///
+/// z 序判定要拿它当排除表：卡片自己被抬高之后会成为栈里的一员，不排掉的话
+/// "第一个普通窗口是谁"永远答错。
+fn widget_hwnds(app: &AppHandle) -> Vec<isize> {
+    let mut mine = Vec::new();
+    for label in ["monitor", "weather"] {
+        if let Some(win) = app.get_webview_window(label) {
+            if let Ok(hwnd) = win.hwnd() {
+                mine.push(hwnd.0 as isize);
+            }
+        }
+    }
+    mine
+}
+
+/// 鼠标按下的通知事件：payload 是"点中的那个悬浮窗的 label"，点别处是空串。
+const CLICK_OUTSIDE_EVENT: &str = "widget-click-outside";
+
+/// 用户在任何地方按下鼠标 —— 前端据此收起右击菜单。
+///
+/// 为什么要绕一圈到原生层：菜单收起原本靠窗口失焦（`blur` / `onFocusChanged`），
+/// 而悬浮窗带 `WS_EX_NOACTIVATE`，点桌面、点任务栏、点别的程序都不会让它失焦，
+/// 于是菜单一直挂在屏幕上。`WH_MOUSE_LL` 是唯一能看到"所有点击"的地方。
+///
+/// 事件带着点中窗口的 label：点在自己身上（菜单项、卡片内）时前端不该关 ——
+/// 那一下由前端自己的 `onMouseDown` / 按钮负责。
+fn on_widget_click_outside(root: isize) {
+    let Some(app) = APP_HANDLE.get() else {
+        return;
+    };
+    let hit = ["monitor", "weather"].into_iter().find(|label| {
+        app.get_webview_window(label)
+            .and_then(|win| win.hwnd().ok())
+            .map(|h| h.0 as isize)
+            == Some(root)
+    });
+    let _ = app.emit(CLICK_OUTSIDE_EVENT, hit.unwrap_or(""));
+}
+
+/// 把一张卡片临时抬起来。调用方必须先确认"桌面真的盖住了它"，见
+/// `on_desktop_foreground`。
+fn raise_for_desktop(app: &AppHandle, label: &str) {
+    if !wants_visible(label).load(Ordering::Relaxed) || is_adjusting(label) {
+        return;
+    }
+    // 用户自己在菜单里选了「置顶」，层级归他管，这里别去翻。
+    if on_top_flag(label).load(Ordering::Relaxed) {
+        return;
+    }
+    if let Some(win) = app.get_webview_window(label) {
+        raise_temp_topmost(&win);
+        temp_top_flag(label).store(true, Ordering::Relaxed);
+        desktop_gone_counter(label).store(0, Ordering::Relaxed);
+    }
+}
+
 /// 桌面被抬到最前 / 又收起的即时反应。
 ///
 /// 这是 `Win+D` 不闪的关键：轮询最快也要等一个间隔，中间那几帧卡片是被桌面
 /// 盖住的；而前台事件在桌面被抬起的同一刻就到，遮挡和抬高几乎同时发生。
+///
+/// 触发条件不能只看"前台窗口是桌面"——**点一下桌面就算**，哪怕卡片在另一块
+/// 屏上正被一个最大化的程序盖着。那种时候把卡片提到置顶层，它就会压到用户
+/// 正在看的程序上面（实测：副屏放卡片，副屏最大化预览器，在主屏点桌面，两张
+/// 卡片同时浮到预览器之上）。所以动手之前先确认桌面**真的在栈顶、或者真的
+/// 盖住了这张卡片**，两个判据任一成立才抬。
 fn on_desktop_foreground(desktop_in_front: bool) {
     let Some(app) = APP_HANDLE.get() else {
         return;
     };
+
+    if !desktop_in_front {
+        for label in ["monitor", "weather"] {
+            if temp_top_flag(label).swap(false, Ordering::Relaxed) {
+                if let Some(win) = app.get_webview_window(label) {
+                    drop_temp_topmost(win);
+                }
+            }
+        }
+        return;
+    }
+
+    let mine = widget_hwnds(app);
+    let desktop_up = desktop::desktop_on_top(&mine);
+    let mut undecided = false;
+
     for label in ["monitor", "weather"] {
-        if !wants_visible(label).load(Ordering::Relaxed) || is_adjusting(label) {
-            continue;
+        let covers = desktop_up
+            || app
+                .get_webview_window(label)
+                .map(|win| desktop::covered_by_desktop(&win))
+                .unwrap_or(false);
+        if covers {
+            raise_for_desktop(app, label);
+        } else if wants_visible(label).load(Ordering::Relaxed) && !is_adjusting(label) {
+            undecided = true;
         }
-        // 用户自己在菜单里选了「置顶」，层级归他管，这里别去翻。
-        if on_top_flag(label).load(Ordering::Relaxed) {
-            continue;
-        }
-        let Some(win) = app.get_webview_window(label) else {
-            continue;
-        };
-        if desktop_in_front {
-            temp_top_flag(label).store(true, Ordering::Relaxed);
-            desktop_gone_counter(label).store(0, Ordering::Relaxed);
-            raise_temp_topmost(&win);
-        } else if temp_top_flag(label).swap(false, Ordering::Relaxed) {
-            drop_temp_topmost(win);
-        }
+    }
+
+    if undecided {
+        // Win+D 的时序是「先把桌面抬起来、再切前台」，钩子偶尔赶在这一步之前。
+        // 等一帧按 z 序再看一眼，别白白错过、留给 250ms 的轮询去兜。判据仍然
+        // 只认「桌面在栈顶」，所以"点了下桌面"那一下不会被误判成显示桌面。
+        let app = app.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(45));
+            let mine = widget_hwnds(&app);
+            if !desktop::desktop_on_top(&mine) {
+                return;
+            }
+            for label in ["monitor", "weather"] {
+                raise_for_desktop(&app, label);
+            }
+        });
     }
 }
 
@@ -1783,6 +1873,8 @@ pub fn run() {
             // 前台事件驱动的那一路（`Win+D` 不闪靠它），守护线程只做兜底。
             let _ = APP_HANDLE.set(handle.clone());
             desktop::watch_foreground(on_desktop_foreground);
+            // 点别处收菜单：悬浮窗不抢焦点，`blur` 那条路走不通，只能看全局鼠标。
+            desktop::watch_click_outside(on_widget_click_outside);
             // An update downloaded before the last restart is still sitting
             // beside the exe, and the settings window has to go on offering it.
             updater::restore_staged(&cfg.update_staged_version);

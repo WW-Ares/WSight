@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { api } from "./api";
+import { api, onClickOutside } from "./api";
 import { WidgetMenu } from "./WidgetMenu";
 
 interface WidgetFrameProps {
@@ -60,42 +60,53 @@ export function WidgetFrame({
    * Dismiss the menu when the click lands outside this widget.
    *
    * A click on the desktop or on another application never reaches the page,
-   * so `onMouseDown` on the card cannot see it - the widget has to learn about
-   * it from losing focus. Two independent signals are used because neither is
-   * complete on its own: the webview's own `blur` event, and Tauri's
-   * window-focus event (a click on the desktop moves activation away from the
-   * window without the renderer always noticing).
+   * so `onMouseDown` on the card cannot see it. Focus used to be the signal
+   * for this, but the widgets are built with `WS_EX_NOACTIVATE` (clicking one
+   * must not raise it above whatever the user is working in) - which also
+   * means they never hold focus to begin with, so `blur` never fires and the
+   * menu stayed on screen indefinitely. The native side hooks the mouse and
+   * reports where every press landed; a press on *this* widget is ignored
+   * here and left to `onMouseDown` below, so menu items still work.
    *
-   * Clicks *inside* the widget are already handled by `onMouseDown` on the
-   * card, and clicks on the menu itself are stopped there, so this effect
-   * deliberately does not add a document-level listener: a capture-phase one
-   * would fire before the menu's own button and close it mid-click.
+   * Clicks on the menu itself are stopped there, so this effect deliberately
+   * does not add a document-level listener: a capture-phase one would fire
+   * before the menu's own button and close it mid-click.
    */
   useEffect(() => {
     if (!menu) return;
 
     const close = () => setMenu(null);
+    const offs: Array<() => void> = [];
     let dropped = false;
-    let unlisten: (() => void) | undefined;
 
     window.addEventListener("blur", close);
 
-    getCurrentWindow()
-      .onFocusChanged(({ payload: focused }) => {
+    const track = (p: Promise<() => void>) => {
+      void p
+        .then((off) => {
+          if (dropped) off();
+          else offs.push(off);
+        })
+        .catch(() => {});
+    };
+
+    track(
+      onClickOutside((hit) => {
+        if (hit !== label) close();
+      }),
+    );
+    track(
+      getCurrentWindow().onFocusChanged(({ payload: focused }) => {
         if (!focused) close();
-      })
-      .then((off) => {
-        if (dropped) off();
-        else unlisten = off;
-      })
-      .catch(() => {});
+      }),
+    );
 
     return () => {
       dropped = true;
       window.removeEventListener("blur", close);
-      unlisten?.();
+      offs.forEach((off) => off());
     };
-  }, [menu]);
+  }, [menu, label]);
 
   /**
    * Arrow keys nudge the widget while 调整 is on.
