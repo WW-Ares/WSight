@@ -11,7 +11,7 @@ mod updater;
 mod weather;
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
@@ -408,12 +408,16 @@ mod desktop {
     pub fn covered_by_desktop(_win: &WebviewWindow) -> bool {
         false
     }
-    pub fn raise_above_desktop(_win: &WebviewWindow) {}
     pub fn set_topmost(_win: &WebviewWindow) {}
+    pub fn place_at_desktop_level(_win: &WebviewWindow) {}
+    pub fn floats_above_apps(_win: &WebviewWindow) -> bool {
+        false
+    }
     pub fn desktop_on_top(_ignore: &[isize]) -> bool {
         false
     }
     pub fn to_bottom(_win: &WebviewWindow) {}
+    pub fn watch_foreground(_sink: fn(bool)) {}
 }
 
 fn adjusting_flag(label: &str) -> &'static AtomicBool {
@@ -465,11 +469,14 @@ fn desktop_gone_counter(label: &str) -> &'static AtomicU32 {
 /// Put a widget at the level its 置顶 setting asks for: floating above
 /// everything, or tucked under every ordinary window.
 ///
-/// Also re-stamps the two traits that make a widget furniture instead of an app
-/// window, because tao rewrites the whole style block behind every flag change:
-/// `set_resizable` (调整 mode) and `set_always_on_top` both silently drop
-/// `WS_EX_TOOLWINDOW`, which is how a widget ends up back in the taskbar after
-/// the user has adjusted it once.
+/// Also re-stamps the furniture traits after the level change, because tao
+/// rewrites the whole style block behind every flag change: `set_resizable`
+/// (调整 mode) silently drops `WS_EX_TOOLWINDOW`, which is how a widget ends up
+/// back in the taskbar after the user has adjusted it once.
+///
+/// The level itself is applied with raw `SetWindowPos` rather than
+/// `set_always_on_top`: tao invalidates the whole window after changing that
+/// flag, i.e. a full WebView2 repaint the user sees as a blink.
 fn apply_widget_level(win: &tauri::WebviewWindow, on_top: bool) {
     let label = win.label().to_string();
     if label == "monitor" || label == "weather" {
@@ -478,14 +485,15 @@ fn apply_widget_level(win: &tauri::WebviewWindow, on_top: bool) {
         temp_top_flag(&label).store(false, Ordering::Relaxed);
         desktop_gone_counter(&label).store(0, Ordering::Relaxed);
     }
-    let _ = win.set_always_on_top(on_top);
     desktop::mark_as_tool(win);
     // 调整 mode needs the keyboard, so activation is allowed only there.
     desktop::set_no_activate(win, !is_adjusting(&label));
     if on_top {
-        desktop::raise_above_desktop(win);
+        desktop::set_topmost(win);
     } else {
-        desktop::to_bottom(win);
+        // 落点是"紧贴桌面上方"，不是"全栈最底"：桌面自己的 z 序会变（Win+D
+        // 时被抬到最上面），压到最底的窗口会在它回落的那几帧里被盖住。
+        desktop::place_at_desktop_level(win);
     }
 }
 
@@ -504,6 +512,66 @@ fn apply_widget_behaviour(app: &AppHandle, cfg: &AppConfig) {
     }
 }
 
+/// 进程级 `AppHandle`，给 C ABI 的事件回调用（那条签名带不了闭包）。
+static APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
+
+/// 临时抬到置顶层 —— 桌面刚压过来这一瞬间用，不改用户的「置顶」设置。
+///
+/// 全程只用 `SetWindowPos`，不碰 tao 的 `set_always_on_top`：后者切完 z 序会
+/// `InvalidateRgn` 让整窗重绘，`Win+D` 两头都会因此闪一帧。
+fn raise_temp_topmost(win: &tauri::WebviewWindow) {
+    desktop::set_topmost(win);
+    desktop::mark_as_tool(win);
+    desktop::set_no_activate(win, true);
+}
+
+/// 桌面收起，让窗口跟着桌面落回桌面层。
+///
+/// 落点不是"全栈最底"，更不是"插一次就完事"：恢复动画里**桌面自己**也在移动
+/// （实测 z 序从栈顶附近滑到最底，约 110ms），所以任何单次插入都会把卡片留在
+/// 半空——要么被桌面盖住（消失一帧），要么压在恢复中的程序上面。
+///
+/// 这里用一个 ~260ms 的短跟踪：每 12ms 重新贴到"桌面正上方"。桌面移动时真的
+/// `SetWindowPos`，不动时 `place_at_desktop_level` 认出来是同一位置直接返回，
+/// 所以既跟得上动画，也不会制造多余的重合成。
+fn drop_temp_topmost(win: tauri::WebviewWindow) {
+    std::thread::spawn(move || {
+        for _ in 0..22 {
+            desktop::place_at_desktop_level(&win);
+            std::thread::sleep(Duration::from_millis(12));
+        }
+    });
+}
+
+/// 桌面被抬到最前 / 又收起的即时反应。
+///
+/// 这是 `Win+D` 不闪的关键：轮询最快也要等一个间隔，中间那几帧卡片是被桌面
+/// 盖住的；而前台事件在桌面被抬起的同一刻就到，遮挡和抬高几乎同时发生。
+fn on_desktop_foreground(desktop_in_front: bool) {
+    let Some(app) = APP_HANDLE.get() else {
+        return;
+    };
+    for label in ["monitor", "weather"] {
+        if !wants_visible(label).load(Ordering::Relaxed) || is_adjusting(label) {
+            continue;
+        }
+        // 用户自己在菜单里选了「置顶」，层级归他管，这里别去翻。
+        if on_top_flag(label).load(Ordering::Relaxed) {
+            continue;
+        }
+        let Some(win) = app.get_webview_window(label) else {
+            continue;
+        };
+        if desktop_in_front {
+            temp_top_flag(label).store(true, Ordering::Relaxed);
+            desktop_gone_counter(label).store(0, Ordering::Relaxed);
+            raise_temp_topmost(&win);
+        } else if temp_top_flag(label).swap(false, Ordering::Relaxed) {
+            drop_temp_topmost(win);
+        }
+    }
+}
+
 /// Keep the widgets where the user expects them, a few times a second.
 ///
 /// Windows does two things behind an app's back, and both are handled here:
@@ -512,15 +580,17 @@ fn apply_widget_behaviour(app: &AppHandle, cfg: &AppConfig) {
 ///   window. Measured on Win11 26100 (`.verify/exp_wind_d4.py`): a bottom-most
 ///   window is *covered*, not hidden; a topmost one stays visible; `SetParent`
 ///   into the desktop (what DeskBox does) works too but changes the coordinate
-///   space of the window and has to be re-done when Explorer restarts. So this
-///   flips a widget to topmost **only while the desktop is in front**, and drops
-///   it back to the bottom the moment the desktop goes away - which is also why
-///   the loop never presses a widget down unconditionally: that would race the
-///   raise and blink once a second.
+///   space of the window and has to be re-done when Explorer restarts. So a
+///   widget goes topmost **only while the desktop is in front**.
+///   This loop is *not* what makes that fast enough to be invisible - the
+///   foreground hook in `desktop::watch_foreground` is. This is the fallback
+///   for the case where the hook event is lost, and the place that puts a
+///   widget back when a shell hides or minimizes it behind our back.
 /// * Some shells minimize or hide a non-activating window anyway. Put it back.
 fn spawn_widget_guard(app: AppHandle) {
     std::thread::spawn(move || loop {
-        std::thread::sleep(Duration::from_millis(700));
+        // 250ms: 兜底要快得让人察觉不到，又不值得为此每秒烧掉 CPU。
+        std::thread::sleep(Duration::from_millis(250));
 
         // 自己的两个窗口要从"谁是第一个普通窗口"的判定里排掉。
         let mut mine: Vec<isize> = Vec::new();
@@ -555,12 +625,19 @@ fn spawn_widget_guard(app: AppHandle) {
                 if desktop_up {
                     counter.store(0, Ordering::Relaxed);
                 } else if counter.fetch_add(1, Ordering::Relaxed) + 1 >= 2 {
-                    apply_widget_level(&win, false);
+                    temp_top_flag(label).store(false, Ordering::Relaxed);
+                    drop_temp_topmost(win);
+                    continue;
                 }
             } else if desktop::covered_by_desktop(&win) {
-                desktop::set_topmost(&win);
+                raise_temp_topmost(&win);
                 temp_top_flag(label).store(true, Ordering::Relaxed);
                 counter.store(0, Ordering::Relaxed);
+            } else if desktop::floats_above_apps(&win) {
+                // 兜底校准：卡片偏高了就贴回桌面上方。点击、恢复动画、第三方
+                // shell 都可能把它顶上去，而"紧贴桌面"这个位置是幂等的 ——
+                // 已经在那儿时 `place_at_desktop_level` 什么都不做。
+                desktop::place_at_desktop_level(&win);
             }
         }
     });
@@ -588,7 +665,7 @@ fn settle_widget(app: AppHandle, label: String) {
                 return;
             }
             if let Some(win) = app.get_webview_window(&label) {
-                desktop::to_bottom(&win);
+                desktop::place_at_desktop_level(&win);
             }
         }
     });
@@ -611,15 +688,27 @@ fn widget_position(cfg: &AppConfig, label: &str) -> Option<(f64, f64)> {
     }
 }
 
-/// Is there still a screen under this point?
+/// Pull a widget back onto a screen.
 ///
-/// Guards the restore path: unplugging the monitor a widget lived on would
-/// otherwise reopen it somewhere off the desktop, where it cannot be grabbed
-/// or even seen. Anything outside every monitor falls back to the default
-/// corner instead.
-fn position_visible(app: &AppHandle, x: f64, y: f64) -> bool {
+/// A widget has no taskbar entry and only a tiny right-click menu, so once its
+/// rectangle leaves every monitor there is nothing on screen left to grab: the
+/// only way back is editing `config.json` by hand. That is not hypothetical -
+/// the 监控 panel was once lost that way, sitting at y=1229 on a 1304-tall
+/// desktop with just 83 physical px still inside.
+///
+/// So *every* position goes through here - the restored one and the saved one -
+/// and the rule is "keep the whole window inside the monitor it overlaps most".
+/// A widget that overlaps none (dragged fully off the edge) snaps to the first
+/// monitor, which is the primary one.
+fn fit_on_screen(app: &AppHandle, x: f64, y: f64, w: f64, h: f64) -> (f64, f64) {
     let monitors = app.available_monitors().unwrap_or_default();
-    monitors.iter().any(|monitor| {
+    if monitors.is_empty() {
+        return (x.max(0.0), y.max(0.0));
+    }
+
+    let mut best: Option<(f64, f64, f64, f64)> = None;
+    let mut best_area = -1.0;
+    for monitor in &monitors {
         let scale = monitor.scale_factor();
         let pos = monitor.position();
         let size = monitor.size();
@@ -627,9 +716,28 @@ fn position_visible(app: &AppHandle, x: f64, y: f64) -> bool {
         let top = pos.y as f64 / scale;
         let right = left + size.width as f64 / scale;
         let bottom = top + size.height as f64 / scale;
-        // the whole title strip has to be reachable, not just the corner pixel
-        x >= left - 8.0 && y >= top - 8.0 && x <= right - 60.0 && y <= bottom - 30.0
-    })
+
+        let overlap_x = (x + w).min(right) - x.max(left);
+        let overlap_y = (y + h).min(bottom) - y.max(top);
+        let area = if overlap_x > 0.0 && overlap_y > 0.0 {
+            overlap_x * overlap_y
+        } else {
+            0.0
+        };
+        if best.is_none() || area > best_area {
+            best = Some((left, top, right, bottom));
+            best_area = area;
+        }
+    }
+
+    let Some((left, top, right, bottom)) = best else {
+        return (x, y);
+    };
+    // `.max(left)` matters when a widget is wider than its screen: clamping to
+    // `right - w` alone would push its left edge back out of view.
+    let max_x = (right - w).max(left);
+    let max_y = (bottom - h).max(top);
+    (x.clamp(left, max_x), y.clamp(top, max_y))
 }
 
 /// Where a widget goes the first time it is ever shown: the primary monitor's
@@ -692,8 +800,8 @@ fn apply_config(app: &AppHandle, cfg: &AppConfig) {
 /// tauri.conf.json) so a widget appears at its remembered spot instead of
 /// jumping there from wherever the platform parked it.
 ///
-/// A width is always restored. A position is restored only if it still lands
-/// on a monitor we have - see `position_visible`.
+/// A width is always restored. A position is restored too, but clamped onto a
+/// screen we still have - see `fit_on_screen`.
 fn apply_saved_geometry(app: &AppHandle, cfg: &AppConfig) {
     let (default_x, default_y) = default_origin(app);
     let mut next_y = default_y;
@@ -708,9 +816,12 @@ fn apply_saved_geometry(app: &AppHandle, cfg: &AppConfig) {
         let _ = win.set_size(tauri::LogicalSize::new(want_w, height));
 
         let (x, y) = match widget_position(cfg, label) {
-            Some((x, y)) if position_visible(app, x, y) => (x, y),
-            // never placed, or placed on a screen that is gone: tuck it under
-            // the widget above rather than on top of it
+            // A remembered spot is honoured, but never outside the desktop. A
+            // config written before this clamp existed (or by a session on a
+            // monitor that is now unplugged) can hold a position that is
+            // metres off screen, which is exactly how a widget goes missing.
+            Some((x, y)) => fit_on_screen(app, x, y, want_w, height),
+            // never placed: tuck it under the widget above rather than on top
             _ => (default_x, next_y),
         };
         let _ = win.set_position(tauri::LogicalPosition::new(x, y));
@@ -1094,6 +1205,48 @@ fn set_widget_always_on_top(
     Ok(())
 }
 
+/// Put a widget back where it can be seen and grabbed, and remember that.
+///
+/// Used when 调整 ends: a drag may have left most of the card past the edge of
+/// the screen, and a widget has no other UI to bring it back. Safe to run here
+/// because `is_adjusting` is already false, so the magnet has let go.
+fn pull_into_screen(app: &AppHandle, label: &str, win: &tauri::WebviewWindow) {
+    let Ok(pos) = win.outer_position() else {
+        return;
+    };
+    let scale = win.scale_factor().unwrap_or(1.0);
+    let (rw, rh) = win
+        .outer_size()
+        .map(|s| (s.width as f64 / scale, s.height as f64 / scale))
+        .unwrap_or((0.0, 0.0));
+    let (rx, ry) = (pos.x as f64 / scale, pos.y as f64 / scale);
+    let (x, y) = fit_on_screen(app, rx, ry, rw, rh);
+    if (x - rx).abs() < 0.5 && (y - ry).abs() < 0.5 {
+        return;
+    }
+    let _ = win.set_position(tauri::LogicalPosition::new(x, y));
+
+    let snapshot = {
+        let state = app.state::<AppState>();
+        let Ok(mut guard) = state.config.lock() else {
+            return;
+        };
+        match label {
+            "monitor" => {
+                guard.monitor_x = Some(x);
+                guard.monitor_y = Some(y);
+            }
+            _ => {
+                guard.weather_x = Some(x);
+                guard.weather_y = Some(y);
+            }
+        }
+        let _ = config::save(&guard);
+        guard.clone()
+    };
+    let _ = app.emit(CONFIG_EVENT, &snapshot);
+}
+
 /// Enter / leave "调整" mode, the only way to move or resize a widget.
 ///
 /// Locked - which is the default - the window is not resizable and has no drag
@@ -1124,6 +1277,7 @@ fn set_widget_adjust(app: AppHandle, label: String, adjusting: bool) -> Result<(
         // user has just asked to work on this window, so taking it is right.
         let _ = win.set_focus();
     } else {
+        pull_into_screen(&app, &label, &win);
         let cfg = read_config(&app);
         apply_widget_level(&win, widget_always_on_top(&cfg, &label));
     }
@@ -1268,13 +1422,23 @@ fn schedule_config_save(app: &AppHandle) {
 ///
 /// Positions are stored in logical px, like every other geometry value in this
 /// app, so they survive a change of display scaling.
+///
+/// Whatever the drag reports is clamped to a screen before it is stored. The
+/// window itself is left where the drag put it (moving it from inside a `Moved`
+/// handler would fight the magnet), but the value that survives a restart is
+/// always a spot the user can reach - see `fit_on_screen`.
 fn remember_position(window: &tauri::Window, pos: tauri::PhysicalPosition<i32>) {
     let label = window.label().to_string();
     if label != "monitor" && label != "weather" {
         return;
     }
     let scale = window.scale_factor().unwrap_or(1.0);
-    let (x, y) = (pos.x as f64 / scale, pos.y as f64 / scale);
+    let (raw_x, raw_y) = (pos.x as f64 / scale, pos.y as f64 / scale);
+    let (w, h) = window
+        .outer_size()
+        .map(|s| (s.width as f64 / scale, s.height as f64 / scale))
+        .unwrap_or((0.0, 0.0));
+    let (x, y) = fit_on_screen(window.app_handle(), raw_x, raw_y, w, h);
 
     let changed = {
         let state = window.app_handle().state::<AppState>();
@@ -1616,6 +1780,9 @@ pub fn run() {
             spawn_weather(handle.clone());
             spawn_widget_guard(handle.clone());
 
+            // 前台事件驱动的那一路（`Win+D` 不闪靠它），守护线程只做兜底。
+            let _ = APP_HANDLE.set(handle.clone());
+            desktop::watch_foreground(on_desktop_foreground);
             // An update downloaded before the last restart is still sitting
             // beside the exe, and the settings window has to go on offering it.
             updater::restore_staged(&cfg.update_staged_version);

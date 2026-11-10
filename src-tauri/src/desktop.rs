@@ -17,6 +17,7 @@
 #![cfg(windows)]
 
 use std::ffi::c_void;
+use std::sync::OnceLock;
 
 use tauri::WebviewWindow;
 
@@ -26,7 +27,6 @@ const WS_EX_APPWINDOW: isize = 0x0004_0000;
 const WS_EX_NOACTIVATE: isize = 0x0800_0000;
 const WS_EX_TOPMOST: isize = 0x0000_0008;
 
-const HWND_TOP: isize = 0;
 const HWND_BOTTOM: isize = 1;
 const HWND_TOPMOST: isize = -1;
 const GW_HWNDNEXT: u32 = 2;
@@ -37,6 +37,10 @@ const SWP_FRAMECHANGED: u32 = 0x0020;
 const SWP_NOOWNERZORDER: u32 = 0x0200;
 
 const GA_ROOT: u32 = 2;
+
+const EVENT_SYSTEM_FOREGROUND: u32 = 0x0003;
+const WINEVENT_OUTOFCONTEXT: u32 = 0x0000;
+const WINEVENT_SKIPOWNPROCESS: u32 = 0x0002;
 
 #[repr(C)]
 struct Point {
@@ -50,6 +54,17 @@ struct Rect {
     top: i32,
     right: i32,
     bottom: i32,
+}
+
+/// `MSG`，只为了让消息循环有个能过 `GetMessageW` 的落点，字段不需要读。
+#[repr(C)]
+struct Msg {
+    hwnd: *mut c_void,
+    message: u32,
+    w_param: usize,
+    l_param: isize,
+    time: u32,
+    pt: Point,
 }
 
 #[link(name = "user32")]
@@ -74,6 +89,19 @@ extern "system" {
     fn GetTopWindow(hwnd: *mut c_void) -> *mut c_void;
     fn GetWindow(hwnd: *mut c_void, cmd: u32) -> *mut c_void;
     fn GetWindowTextLengthW(hwnd: *mut c_void) -> i32;
+    fn SetWinEventHook(
+        event_min: u32,
+        event_max: u32,
+        module: *mut c_void,
+        proc: Option<unsafe extern "system" fn(*mut c_void, u32, *mut c_void, i32, i32, u32, u32)>,
+        pid: u32,
+        tid: u32,
+        flags: u32,
+    ) -> *mut c_void;
+    fn UnhookWinEvent(hook: *mut c_void) -> i32;
+    fn GetMessageW(msg: *mut Msg, hwnd: *mut c_void, min: u32, max: u32) -> i32;
+    fn TranslateMessage(msg: *const Msg) -> i32;
+    fn DispatchMessageW(msg: *const Msg) -> isize;
 }
 
 fn handle(win: &WebviewWindow) -> Option<*mut c_void> {
@@ -238,16 +266,64 @@ pub fn set_topmost(win: &WebviewWindow) {
     }
 }
 
-/// 抬到普通窗口栈顶 —— 只在"被桌面盖住"时用，那个时刻其他窗口都被最小化了。
-pub fn raise_above_desktop(win: &WebviewWindow) {
+/// 桌面窗口（`Progman`，没有就退而求其次找 `WorkerW`）以及它**上面**那个
+/// 普通窗口。
+///
+/// 返回值里的第二项是"桌面正上方"的锚点：把悬浮窗插到它下面，窗口就落在
+/// 桌面之上、所有普通窗口之下。找不到桌面时返回 `None`。
+fn desktop_and_anchor() -> Option<(*mut c_void, *mut c_void)> {
+    for wanted in ["Progman", "WorkerW"] {
+        // 从栈顶往下走。跳过的只有隐藏窗口和置顶窗口：后者是任务栏、输入法
+        // 这类浮层，把卡片插到它们下面会让卡片也变成置顶的。
+        let mut h = unsafe { GetTopWindow(std::ptr::null_mut()) };
+        let mut anchor: *mut c_void = std::ptr::null_mut();
+        while !h.is_null() {
+            // SAFETY: 全部只读查询，h 来自上面的 z 序枚举。
+            let (visible, ex) =
+                unsafe { (IsWindowVisible(h) != 0, GetWindowLongPtrW(h, GWL_EXSTYLE)) };
+            if visible && ex & WS_EX_TOPMOST == 0 {
+                if class_name(h) == wanted {
+                    return Some((h, anchor));
+                }
+                anchor = h;
+            }
+            // SAFETY: 沿着 z 序往下走一格。
+            h = unsafe { GetWindow(h, GW_HWNDNEXT) };
+        }
+    }
+    None
+}
+
+/// 把窗口放回"桌面家具"该在的那一层 —— **紧贴桌面上方**。
+///
+/// 不能简单用 `HWND_BOTTOM`。桌面本身也会动：按 `Win+D` 时它被抬到最上面，
+/// 恢复时从高处落回去。落回过程的那几帧里，压到"全栈最底"的窗口会跑到桌面
+/// **下面**，于是卡片整块消失一帧 —— 这就是恢复时那一下闪。
+///
+/// 插到"桌面上方那个窗口"的下面，位置就与桌面同步：桌面在半空时卡片在它正
+/// 上方，桌面落地时卡片仍在它正上方，永远不会被桌面盖住。
+///
+/// 顺带解决了另一个问题：`SetWindowPos` 的目标是普通层窗口，置顶的窗口会被
+/// 自动摘掉 `WS_EX_TOPMOST`，退出置顶和重新定位合并成一次调用，中间不会出现
+/// "已退出置顶但还在最上面"的合成帧。
+pub fn place_at_desktop_level(win: &WebviewWindow) {
     let Some(hwnd) = handle(win) else {
         return;
     };
-    // SAFETY: 只改 z 序，不动位置尺寸，也不激活。
+    let Some((_desktop, anchor)) = desktop_and_anchor() else {
+        // 找不到桌面（极少见）：退回原来的最底层。
+        to_bottom(win);
+        return;
+    };
+    // 锚点就是自己 = 已经贴在桌面正上方，不用再动。挪一下只会多一次重合成。
+    if anchor == hwnd {
+        return;
+    }
+    // SAFETY: 只改 z 序；`HWND_TOP` 是常量 0。
     unsafe {
         SetWindowPos(
             hwnd,
-            HWND_TOP as *mut c_void,
+            anchor,
             0,
             0,
             0,
@@ -255,6 +331,43 @@ pub fn raise_above_desktop(win: &WebviewWindow) {
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER,
         );
     }
+}
+
+/// 窗口是不是浮在某个普通窗口上面了（本该紧贴桌面，却压着别人）。
+///
+/// "上面有窗口"是正常的——卡片本来就该在所有程序下面。要查的是**下面**：
+/// 从卡片接着往栈底走，桌面之前如果还有普通的、有标题的窗口，说明卡片停在
+/// 半空，压着那个程序。桌面窗口本身不算（卡片就该在它上面）。
+pub fn floats_above_apps(win: &WebviewWindow) -> bool {
+    let Some(hwnd) = handle(win) else {
+        return false;
+    };
+    let mut h = unsafe { GetTopWindow(std::ptr::null_mut()) };
+    while !h.is_null() && h != hwnd {
+        h = unsafe { GetWindow(h, GW_HWNDNEXT) };
+    }
+    if h.is_null() {
+        return false;
+    }
+    // SAFETY: 从卡片往下遍历，全部是只读查询。
+    unsafe {
+        h = GetWindow(h, GW_HWNDNEXT);
+        while !h.is_null() {
+            let (visible, ex, has_title) = (
+                IsWindowVisible(h) != 0,
+                GetWindowLongPtrW(h, GWL_EXSTYLE),
+                GetWindowTextLengthW(h) > 0,
+            );
+            if visible && ex & WS_EX_TOPMOST == 0 && has_title {
+                let cls = class_name(h);
+                if cls != "Progman" && cls != "WorkerW" {
+                    return true;
+                }
+            }
+            h = GetWindow(h, GW_HWNDNEXT);
+        }
+    }
+    false
 }
 
 /// 贴回窗口栈最底下（桌面家具的那一层）。
@@ -274,4 +387,69 @@ pub fn to_bottom(win: &WebviewWindow) {
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER,
         );
     }
+}
+
+// ------------------------------------------------------- foreground watching
+//
+// 贴底的窗口在 `Win+D` 那一刻会被桌面盖住。靠每 700ms 的轮询再抬高，用户
+// 看到的是"卡片消失一下，然后又回来"—— 那一闪是轮询间隔造成的，不是系统的
+// 效果。前台窗口变化事件在桌面被抬起的同一瞬间就发出来，毫秒级跟上，就没有
+// 可看的那一下了；轮询仍然留着，只当兜底（钩子掉了、事件丢了）。
+
+static FOREGROUND_SINK: OnceLock<fn(bool)> = OnceLock::new();
+
+unsafe extern "system" fn foreground_proc(
+    _hook: *mut c_void,
+    event: u32,
+    hwnd: *mut c_void,
+    _id_object: i32,
+    _id_child: i32,
+    _thread: u32,
+    _time: u32,
+) {
+    if event != EVENT_SYSTEM_FOREGROUND || hwnd.is_null() {
+        return;
+    }
+    // 桌面的两种宿主都算：`Progman`（一般情况）、`WorkerW`（壁纸轮播/动态壁纸）。
+    let on_desktop = matches!(class_name(hwnd).as_str(), "Progman" | "WorkerW");
+    if let Some(sink) = FOREGROUND_SINK.get() {
+        sink(on_desktop);
+    }
+}
+
+/// 订阅"桌面跑到最前面"和"桌面又收起"这两个瞬间。
+///
+/// `sink(true)` = 现在盖在最上面的是桌面（用户刚按了 `Win+D`）；
+/// `sink(false)` = 有别的窗口接管了前台。
+///
+/// 事件由系统投递到注册线程的消息循环里，所以这里自带一个线程和一个
+/// `GetMessageW` 循环，不占用 Tauri 的主循环，也不和它抢消息。
+pub fn watch_foreground(sink: fn(bool)) {
+    if FOREGROUND_SINK.set(sink).is_err() {
+        return; // 已经有人订阅了，重复注册没有意义
+    }
+    std::thread::spawn(|| {
+        // SAFETY: 钩子只监听一个事件，回调不碰任何未初始化内存；消息循环
+        // 的唯一作用就是让系统能把事件送进来。
+        unsafe {
+            let hook = SetWinEventHook(
+                EVENT_SYSTEM_FOREGROUND,
+                EVENT_SYSTEM_FOREGROUND,
+                std::ptr::null_mut(),
+                Some(foreground_proc),
+                0,
+                0,
+                WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
+            );
+            if hook.is_null() {
+                return;
+            }
+            let mut msg = std::mem::zeroed::<Msg>();
+            while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+            UnhookWinEvent(hook);
+        }
+    });
 }
