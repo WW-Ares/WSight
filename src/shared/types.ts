@@ -383,6 +383,13 @@ export interface AppConfig {
   /** reserved: start both widgets on login */
   autostart: boolean;
   /**
+   * Show the notification-area icon. Off is for a clean tray: 设置 stays
+   * reachable from each widget's right-click menu, 退出 from the settings
+   * window. The icon is hidden rather than destroyed, so the switch is
+   * instant and reversible.
+   */
+  trayIcon: boolean;
+  /**
    * Look for a new release in the background and download it ready to install.
    *
    * Staging the download is all this does - nothing is ever replaced without
@@ -557,6 +564,7 @@ export const DEFAULT_CONFIG: AppConfig = {
   weatherAlwaysOnTop: false,
 
   autostart: false,
+  trayIcon: true,
 
   updateAuto: true,
   updateLastCheck: 0,

@@ -146,6 +146,13 @@ pub struct AppConfig {
     // --------------------------------------------------------------- misc
     /// reserved: launch both widgets on login
     pub autostart: bool,
+    /// Show the notification-area icon.
+    ///
+    /// On by default because the tray is where the two 显示/隐藏 switches and
+    /// 退出 live. Turning it off is for people who keep their tray pristine and
+    /// reach 设置 through a widget's right-click menu - the tray icon is only
+    /// made invisible, never destroyed, so the switch takes effect at once.
+    pub tray_icon: bool,
 
     /// Diagnostic: when true the monitor window title carries the real
     /// rendering fps and the observed snapshot interval. Not exposed in the
@@ -231,6 +238,7 @@ impl Default for AppConfig {
             weather_always_on_top: false,
 
             autostart: false,
+            tray_icon: true,
             debug_fps: false,
 
             update_auto: true,

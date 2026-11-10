@@ -77,6 +77,17 @@ export const api = {
     invoke<void>("set_widget_adjust", { label, adjusting }),
 
   /**
+   * Put a widget back down after a click lifted it.
+   *
+   * The window is `WS_EX_NOACTIVATE`, so a click does not take focus - but
+   * WebView2 brings its host to the top of the z-order anyway, leaving the card
+   * in front of whatever the user was using. Fire-and-forget on mousedown; the
+   * backend waits a beat (the raise is WebView2's own timing) and re-bottoms it.
+   */
+  settleWidget: (label: "monitor" | "weather") =>
+    invoke<void>("settle_widget", { label }),
+
+  /**
    * Shift a widget by a few logical pixels - the arrow-key nudge. Distances
    * are logical, so a step is a step at any display scaling.
    */

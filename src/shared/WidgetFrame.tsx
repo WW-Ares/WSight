@@ -169,7 +169,12 @@ export function WidgetFrame({
           event.preventDefault();
           setMenu({ x: event.clientX, y: event.clientY });
         }}
-        onMouseDown={() => setMenu(null)}
+        onMouseDown={() => {
+          setMenu(null);
+          // 点一下就会把窗口顶到最前面去（WebView2 干的，WS_EX_NOACTIVATE
+          // 只挡焦点）。收回来，让它继续当桌面家具。
+          void api.settleWidget(label).catch(() => {});
+        }}
       >
         <div className="panel-header" data-tauri-drag-region={dragRegion}>
           <span className="panel-title">{title}</span>

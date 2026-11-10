@@ -1233,6 +1233,15 @@ export function SettingsPanel({ initial }: { initial: AppConfig }) {
               onChange={(v) => update({ autostart: v })}
             />
           </Row>
+          <Row
+            label="托盘图标"
+            hint="关闭后托盘不再显示图标；右键悬浮窗选「设置…」仍能打开这个窗口"
+          >
+            <Toggle
+              checked={draft.trayIcon}
+              onChange={(v) => update({ trayIcon: v })}
+            />
+          </Row>
         </Section>
 
         <Section title="更新">

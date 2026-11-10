@@ -1,6 +1,8 @@
 mod autostart;
 mod collector;
 mod config;
+#[cfg(windows)]
+mod desktop;
 mod launchlog;
 mod monitorcache;
 mod native;
@@ -8,7 +10,7 @@ mod single_instance;
 mod updater;
 mod weather;
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -362,75 +364,57 @@ fn snap_widget(window: &tauri::Window) {
 // Tauri can float a window above everything (`set_always_on_top`) but has no
 // way to say the opposite, which is where a desktop widget actually wants to
 // live: at the very bottom of the stack, behind every ordinary window.
-// `SetWindowPos(HWND_BOTTOM)` is that missing call. Declared by hand because
-// it is one function; pulling in the whole `windows` crate for it would add
-// build time to every release.
-#[cfg(windows)]
-mod zorder {
-    use std::ffi::c_void;
-
-    const HWND_TOP: isize = 0;
-    const HWND_BOTTOM: isize = 1;
-    const SWP_NOSIZE: u32 = 0x0001;
-    const SWP_NOMOVE: u32 = 0x0002;
-    const SWP_NOACTIVATE: u32 = 0x0010;
-    const SWP_NOOWNERZORDER: u32 = 0x0200;
-
-    #[link(name = "user32")]
-    extern "system" {
-        fn SetWindowPos(
-            hwnd: *mut c_void,
-            insert_after: *mut c_void,
-            x: i32,
-            y: i32,
-            cx: i32,
-            cy: i32,
-            flags: u32,
-        ) -> i32;
-    }
-
-    fn place(win: &tauri::WebviewWindow, after: isize) {
-        let Ok(hwnd) = win.hwnd() else {
-            return;
-        };
-        // SAFETY: the handle comes from Tauri's own window, and the flags ask
-        // user32 to change nothing except the z-order.
-        unsafe {
-            let _ = SetWindowPos(
-                hwnd.0 as *mut c_void,
-                after as *mut c_void,
-                0,
-                0,
-                0,
-                0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER,
-            );
-        }
-    }
-
-    /// Behind every ordinary window - the desktop-furniture level.
-    pub fn to_bottom(win: &tauri::WebviewWindow) {
-        place(win, HWND_BOTTOM);
-    }
-
-    /// Top of the ordinary (non-topmost) band. Used while adjusting, so the
-    /// widget the user is working on is not hidden behind something else.
-    pub fn to_front(win: &tauri::WebviewWindow) {
-        place(win, HWND_TOP);
-    }
-}
-
-#[cfg(not(windows))]
-mod zorder {
-    pub fn to_bottom(_win: &tauri::WebviewWindow) {}
-    pub fn to_front(_win: &tauri::WebviewWindow) {}
-}
+// `SetWindowPos(HWND_BOTTOM)` is that missing call, and it lives in `desktop`
+// together with the two other Win32-only traits a real desktop widget needs
+// (tool-window style, no-activate). See `desktop.rs`.
 
 /// Whether a widget is currently in "调整" mode. Tracked natively because the
 /// settings window autosaves in the background, and a save must not drag a
 /// widget the user is in the middle of positioning back down to the desktop.
 static ADJUSTING_MONITOR: AtomicBool = AtomicBool::new(false);
 static ADJUSTING_WEATHER: AtomicBool = AtomicBool::new(false);
+
+/// Whether the user wants each widget on screen. Mirrors the config, because
+/// the guard thread below must not read the config file every half second, and
+/// must never disagree with a save that is still in flight.
+static WANT_VISIBLE_MONITOR: AtomicBool = AtomicBool::new(false);
+static WANT_VISIBLE_WEATHER: AtomicBool = AtomicBool::new(false);
+
+/// 置顶 state, for the same reason: the guard has to know whether a widget is
+/// allowed to sit above the desktop or belongs under every window.
+static ON_TOP_MONITOR: AtomicBool = AtomicBool::new(false);
+static ON_TOP_WEATHER: AtomicBool = AtomicBool::new(false);
+
+/// "暂时置顶"：显示桌面时被临时抬到 topmost，桌面收起后必须落回底部。
+static TEMP_TOP_MONITOR: AtomicBool = AtomicBool::new(false);
+static TEMP_TOP_WEATHER: AtomicBool = AtomicBool::new(false);
+
+/// 连续多少轮"桌面已经收回去了"。连中两轮才落回，避免 Win+D 切换途中的
+/// 一帧抖动把窗口按到桌面底下再抬起来。
+static DESKTOP_GONE_MONITOR: AtomicU32 = AtomicU32::new(0);
+static DESKTOP_GONE_WEATHER: AtomicU32 = AtomicU32::new(0);
+
+/// Windows-only counterpart of the block above: there is no portable version of
+/// "a tool window that ignores activation and still shows after 显示桌面", so
+/// every other platform gets no-ops.
+#[cfg(not(windows))]
+mod desktop {
+    use tauri::WebviewWindow;
+    pub fn mark_as_tool(_win: &WebviewWindow) {}
+    pub fn set_no_activate(_win: &WebviewWindow, _on: bool) {}
+    pub fn hidden_by_shell(_win: &WebviewWindow) -> bool {
+        false
+    }
+    pub fn covered_by_desktop(_win: &WebviewWindow) -> bool {
+        false
+    }
+    pub fn raise_above_desktop(_win: &WebviewWindow) {}
+    pub fn set_topmost(_win: &WebviewWindow) {}
+    pub fn desktop_on_top(_ignore: &[isize]) -> bool {
+        false
+    }
+    pub fn to_bottom(_win: &WebviewWindow) {}
+}
 
 fn adjusting_flag(label: &str) -> &'static AtomicBool {
     match label {
@@ -450,14 +434,58 @@ fn widget_always_on_top(cfg: &AppConfig, label: &str) -> bool {
     }
 }
 
+fn on_top_flag(label: &str) -> &'static AtomicBool {
+    match label {
+        "monitor" => &ON_TOP_MONITOR,
+        _ => &ON_TOP_WEATHER,
+    }
+}
+
+fn wants_visible(label: &str) -> &'static AtomicBool {
+    match label {
+        "monitor" => &WANT_VISIBLE_MONITOR,
+        _ => &WANT_VISIBLE_WEATHER,
+    }
+}
+
+fn temp_top_flag(label: &str) -> &'static AtomicBool {
+    match label {
+        "monitor" => &TEMP_TOP_MONITOR,
+        _ => &TEMP_TOP_WEATHER,
+    }
+}
+
+fn desktop_gone_counter(label: &str) -> &'static AtomicU32 {
+    match label {
+        "monitor" => &DESKTOP_GONE_MONITOR,
+        _ => &DESKTOP_GONE_WEATHER,
+    }
+}
+
 /// Put a widget at the level its 置顶 setting asks for: floating above
 /// everything, or tucked under every ordinary window.
+///
+/// Also re-stamps the two traits that make a widget furniture instead of an app
+/// window, because tao rewrites the whole style block behind every flag change:
+/// `set_resizable` (调整 mode) and `set_always_on_top` both silently drop
+/// `WS_EX_TOOLWINDOW`, which is how a widget ends up back in the taskbar after
+/// the user has adjusted it once.
 fn apply_widget_level(win: &tauri::WebviewWindow, on_top: bool) {
+    let label = win.label().to_string();
+    if label == "monitor" || label == "weather" {
+        on_top_flag(&label).store(on_top, Ordering::Relaxed);
+        // 用户（或配置）已经明确指定层级了，临时置顶那一页翻过去。
+        temp_top_flag(&label).store(false, Ordering::Relaxed);
+        desktop_gone_counter(&label).store(0, Ordering::Relaxed);
+    }
     let _ = win.set_always_on_top(on_top);
+    desktop::mark_as_tool(win);
+    // 调整 mode needs the keyboard, so activation is allowed only there.
+    desktop::set_no_activate(win, !is_adjusting(&label));
     if on_top {
-        zorder::to_front(win);
+        desktop::raise_above_desktop(win);
     } else {
-        zorder::to_bottom(win);
+        desktop::to_bottom(win);
     }
 }
 
@@ -474,6 +502,96 @@ fn apply_widget_behaviour(app: &AppHandle, cfg: &AppConfig) {
         let _ = win.set_resizable(false);
         apply_widget_level(&win, widget_always_on_top(cfg, label));
     }
+}
+
+/// Keep the widgets where the user expects them, a few times a second.
+///
+/// Windows does two things behind an app's back, and both are handled here:
+///
+/// * **显示桌面 (`Win+D`)** raises the desktop window above every ordinary
+///   window. Measured on Win11 26100 (`.verify/exp_wind_d4.py`): a bottom-most
+///   window is *covered*, not hidden; a topmost one stays visible; `SetParent`
+///   into the desktop (what DeskBox does) works too but changes the coordinate
+///   space of the window and has to be re-done when Explorer restarts. So this
+///   flips a widget to topmost **only while the desktop is in front**, and drops
+///   it back to the bottom the moment the desktop goes away - which is also why
+///   the loop never presses a widget down unconditionally: that would race the
+///   raise and blink once a second.
+/// * Some shells minimize or hide a non-activating window anyway. Put it back.
+fn spawn_widget_guard(app: AppHandle) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_millis(700));
+
+        // 自己的两个窗口要从"谁是第一个普通窗口"的判定里排掉。
+        let mut mine: Vec<isize> = Vec::new();
+        for label in ["monitor", "weather"] {
+            if let Some(win) = app.get_webview_window(label) {
+                if let Ok(hwnd) = win.hwnd() {
+                    mine.push(hwnd.0 as isize);
+                }
+            }
+        }
+        let desktop_up = desktop::desktop_on_top(&mine);
+
+        for label in ["monitor", "weather"] {
+            if !wants_visible(label).load(Ordering::Relaxed) || is_adjusting(label) {
+                continue;
+            }
+            let Some(win) = app.get_webview_window(label) else {
+                continue;
+            };
+            if desktop::hidden_by_shell(&win) {
+                let _ = win.show();
+                apply_widget_level(&win, on_top_flag(label).load(Ordering::Relaxed));
+                continue;
+            }
+            if on_top_flag(label).load(Ordering::Relaxed) {
+                continue;
+            }
+
+            let counter = desktop_gone_counter(label);
+            if temp_top_flag(label).load(Ordering::Relaxed) {
+                // 已经在"显示桌面"里被抬起来了：桌面一收起就落回底部。
+                if desktop_up {
+                    counter.store(0, Ordering::Relaxed);
+                } else if counter.fetch_add(1, Ordering::Relaxed) + 1 >= 2 {
+                    apply_widget_level(&win, false);
+                }
+            } else if desktop::covered_by_desktop(&win) {
+                desktop::set_topmost(&win);
+                temp_top_flag(label).store(true, Ordering::Relaxed);
+                counter.store(0, Ordering::Relaxed);
+            }
+        }
+    });
+}
+
+/// Undo the raise that a click causes.
+///
+/// `WS_EX_NOACTIVATE` stops the click from *activating* the window, but WebView2
+/// still brings it to the top of the z-order, which leaves a desktop widget in
+/// front of the program the user was working in. The click is visible to the
+/// front end, so it calls this and we put the window back down - a few times,
+/// because the raise is WebView2's own work and its timing is not ours to know.
+#[tauri::command]
+fn settle_widget(app: AppHandle, label: String) {
+    if label != "monitor" && label != "weather" {
+        return;
+    }
+    std::thread::spawn(move || {
+        for _ in 0..3 {
+            std::thread::sleep(Duration::from_millis(160));
+            if is_adjusting(&label)
+                || on_top_flag(&label).load(Ordering::Relaxed)
+                || temp_top_flag(&label).load(Ordering::Relaxed)
+            {
+                return;
+            }
+            if let Some(win) = app.get_webview_window(&label) {
+                desktop::to_bottom(&win);
+            }
+        }
+    });
 }
 
 /// Vertical gap used when stacking the two widgets on a first run.
@@ -539,6 +657,10 @@ fn default_origin(app: &AppHandle) -> (f64, f64) {
 /// from a settings draft.
 fn apply_config(app: &AppHandle, cfg: &AppConfig) {
     for (label, visible) in [("monitor", cfg.show_monitor), ("weather", cfg.show_weather)] {
+        // The guard thread reads this instead of the config file, so it has to
+        // be told *before* the window is shown or hidden - otherwise a hide the
+        // user just asked for would be undone 700 ms later.
+        wants_visible(label).store(visible, Ordering::Relaxed);
         if let Some(win) = app.get_webview_window(label) {
             if visible {
                 let _ = win.show();
@@ -547,6 +669,10 @@ fn apply_config(app: &AppHandle, cfg: &AppConfig) {
             }
         }
     }
+    // 托盘关闭 + 两个窗口都隐藏 = 这个程序在桌面上再无入口，只能去任务管理器。
+    // 所以"没有可见窗口"时无视设置，把图标放回来当最后一条退路。
+    let widgets_visible = cfg.show_monitor || cfg.show_weather;
+    set_tray_visible(app, cfg.tray_icon || !widgets_visible);
     // Re-apply 置顶: it is edited from the settings window as well as from each
     // widget's own menu. A widget being adjusted is left where it is.
     for label in ["monitor", "weather"] {
@@ -987,7 +1113,12 @@ fn set_widget_adjust(app: AppHandle, label: String, adjusting: bool) -> Result<(
     adjusting_flag(&label).store(adjusting, Ordering::Relaxed);
     reset_snap_track();
     if adjusting {
-        zorder::to_front(&win);
+        // 调整 needs the keyboard (arrow-key nudging) and needs to be reachable
+        // above whatever the user has open, so activation is re-enabled for the
+        // duration - `apply_widget_level` reads `is_adjusting` and lets it back
+        // in. The styles have to be stamped after `set_resizable`, which is
+        // what dropped them.
+        apply_widget_level(&win, true);
         // Arrow-key nudging needs the keyboard, and the widgets are built
         // without focus so they never steal it on launch. In 调整 mode the
         // user has just asked to work on this window, so taking it is right.
@@ -1334,12 +1465,47 @@ fn flip_visibility(app: &AppHandle, label: &str) {
         return;
     };
     let now_visible = !win.is_visible().unwrap_or(false);
+    // Told before the window moves: the guard thread would otherwise see a
+    // hidden widget whose config still says "show" and put it straight back.
+    wants_visible(label).store(now_visible, Ordering::Relaxed);
     if now_visible {
         let _ = win.show();
     } else {
         let _ = win.hide();
     }
     persist_visibility(app, label, now_visible);
+}
+
+/// Show or hide the notification-area icon.
+///
+/// The tray is always *built*; the switch only flips its visibility, so it can
+/// come and go at runtime without touching the menu or the icon handle. With
+/// the icon gone, 设置 is still reachable from each widget's right-click menu
+/// and 退出程序 from the settings window itself.
+/// Last value handed to `set_tray_visible`. The settings window saves on every
+/// edit, and `apply_config` runs on each save - logging or re-applying every
+/// time would either spam launch.log or flicker the icon.
+static TRAY_VISIBLE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(2);
+
+fn set_tray_visible(app: &AppHandle, visible: bool) {
+    let want = if visible { 1 } else { 0 };
+    if TRAY_VISIBLE.swap(want, Ordering::Relaxed) == want {
+        return;
+    }
+    let Some(tray) = app.tray_by_id("main") else {
+        launchlog::log("tray: icon was never built - visibility not applied");
+        return;
+    };
+    match tray.set_visible(visible) {
+        // launch.log is the only place a "the switch does nothing" report can
+        // be answered from, so record the one line that changes state.
+        Ok(()) => launchlog::log(if visible {
+            "tray: icon shown"
+        } else {
+            "tray: icon hidden"
+        }),
+        Err(e) => launchlog::log(&format!("tray: set_visible({visible}) failed: {e}")),
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1369,6 +1535,7 @@ pub fn run() {
             reset_widget_positions,
             nudge_widget,
             set_widget_always_on_top,
+            settle_widget,
             set_widget_adjust,
             toggle_widget,
             open_settings_window,
@@ -1447,6 +1614,7 @@ pub fn run() {
 
             spawn_collector(handle.clone());
             spawn_weather(handle.clone());
+            spawn_widget_guard(handle.clone());
 
             // An update downloaded before the last restart is still sitting
             // beside the exe, and the settings window has to go on offering it.
