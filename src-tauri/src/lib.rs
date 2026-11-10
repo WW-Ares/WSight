@@ -385,7 +385,9 @@ static WANT_VISIBLE_WEATHER: AtomicBool = AtomicBool::new(false);
 static ON_TOP_MONITOR: AtomicBool = AtomicBool::new(false);
 static ON_TOP_WEATHER: AtomicBool = AtomicBool::new(false);
 
-/// "暂时置顶"：显示桌面时被临时抬到 topmost，桌面收起后必须落回底部。
+/// "暂时置顶"：显示桌面期间卡片跟着桌面走（贴在桌面正上方），桌面收起后
+/// 必须跟着落回。注意它**不是** `WS_EX_TOPMOST`——置顶层高于一切，最小化动画
+/// 还没走完的窗口会被卡片压住；贴桌面正上方则任何可见窗口都必然在卡片之上。
 static TEMP_TOP_MONITOR: AtomicBool = AtomicBool::new(false);
 static TEMP_TOP_WEATHER: AtomicBool = AtomicBool::new(false);
 
@@ -411,7 +413,7 @@ mod desktop {
     pub fn is_topmost(_win: &WebviewWindow) -> bool {
         false
     }
-    pub fn place_at_desktop_level(_win: &WebviewWindow, _ignore: &[isize]) -> bool {
+    pub fn stick_to_desktop(_win: &WebviewWindow, _ignore: &[isize]) -> bool {
         false
     }
     pub fn desktop_on_top(_ignore: &[isize]) -> bool {
@@ -497,14 +499,17 @@ fn apply_widget_level(win: &tauri::WebviewWindow, on_top: bool) {
     }
 }
 
-/// 把一张卡片贴回桌面层，顺手把另一张卡片从锚点候选里排掉。
+/// 把一张卡片贴回桌面层，顺手把另一张卡片从插入候选里排掉。
 ///
-/// 两张卡片都停在桌面正上方，互为邻居。不排掉的话，各自的 `place_at_desktop_level`
-/// 都会把对方当成"挡在桌面之上的那个窗口"，于是把自己搬到对方下面，再来一轮 ——
-/// 每次搬运都是一次重合成，连着几十次就是肉眼可见的持续轻闪。
+/// "桌面层"就是"桌面窗口正上方"：平时 = 窗口栈最底（所有普通窗口之下）；
+/// 桌面被 Win+D 抬起来时卡片跟着上去（`stick_to_desktop`），所以这一下同时
+/// 是"抬升"和"落回"。两张卡片的句柄互相当排除表：`sits_on_desktop` 把同样
+/// 贴桌面的兄弟当邻居跳过，`stick_to_desktop` 插入时也不会拿兄弟当锚点 ——
+/// 否则它们会把彼此当成"挡在桌面之上的那个窗口"来回搬运，每次搬运都是一次
+/// 重合成，连着几十次就是肉眼可见的持续轻闪。
 fn place_widget_level(win: &tauri::WebviewWindow) -> bool {
     let mine = widget_hwnds(win.app_handle());
-    desktop::place_at_desktop_level(win, &mine)
+    desktop::stick_to_desktop(win, &mine)
 }
 
 /// Apply the remembered 置顶 choice and the locked-by-default state.
@@ -525,15 +530,11 @@ fn apply_widget_behaviour(app: &AppHandle, cfg: &AppConfig) {
 /// 进程级 `AppHandle`，给 C ABI 的事件回调用（那条签名带不了闭包）。
 static APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
 
-/// 临时抬到置顶层 —— 桌面刚压过来这一瞬间用，不改用户的「置顶」设置。
-///
-/// 全程只用 `SetWindowPos`，不碰 tao 的 `set_always_on_top`：后者切完 z 序会
-/// `InvalidateRgn` 让整窗重绘，`Win+D` 两头都会因此闪一帧。
-/// 落回日志的节流：同一张卡片 2 秒内只写一条。
+/// z 序调整日志的节流：同一张卡片 2 秒内只写一条。
 ///
 /// 这条日志只在"真挪了"时触发，正常情况下切换一次就一条。可一旦哪天又出现
 /// "清不掉"的现场，250ms 一轮会把 launch.log 刷满，反而看不到更早的线索。
-fn drop_log_due(label: &str) -> bool {
+fn z_log_due(label: &str) -> bool {
     static LAST: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
     let slot = if label == "monitor" { 0 } else { 1 };
     let now = std::time::SystemTime::now()
@@ -548,15 +549,19 @@ fn drop_log_due(label: &str) -> bool {
     true
 }
 
-fn raise_temp_topmost(win: &tauri::WebviewWindow) {
+/// 把一张卡片贴到「桌面正上方」—— 跟随桌面，而不是压到一切之上。
+///
+/// 只在"桌面真的占上来"时调用（调用方见 `on_desktop_foreground`）。
+/// 全程只用原生 `SetWindowPos`，不碰 tao 的 `set_always_on_top`：后者切完 z 序
+/// 会 `InvalidateRgn` 让整窗重绘，`Win+D` 两头都会因此闪一帧。
+fn stick_for_desktop(win: &tauri::WebviewWindow) {
     desktop::mark_as_tool(win);
     desktop::set_no_activate(win, true);
-    // 已经在置顶层就别再调 `SetWindowPos`：每次都是一次重合成，连点两下桌面
-    // 就是四次无谓的重绘（`is_topmost` 看的是窗口上的实际样式位）。
-    if !desktop::is_topmost(win) {
-        desktop::set_topmost(win);
+    // `stick_to_desktop` 对"已经坐在桌面上"的卡片是幂等 no-op，所以连点两下
+    // 桌面、守护线程每 250ms 兜底都不会多出一次重合成。真挪了才记日志。
+    if place_widget_level(win) && z_log_due(win.label()) {
         launchlog::log(&format!(
-            "z: {} 临时置顶（前台={}）",
+            "z: {} 贴到桌面正上方（前台={}）",
             win.label(),
             desktop::foreground_class(),
         ));
@@ -570,14 +575,15 @@ fn raise_temp_topmost(win: &tauri::WebviewWindow) {
 /// 半空——要么被桌面盖住（消失一帧），要么压在恢复中的程序上面。
 ///
 /// 这里用一个 ~260ms 的短跟踪：每 12ms 重新贴到"桌面正上方"。桌面移动时真的
-/// `SetWindowPos`，不动时 `place_at_desktop_level` 认出来是同一位置直接返回，
+/// `SetWindowPos`，不动时 `stick_to_desktop` 认出来是同一位置直接返回，
 /// 所以既跟得上动画，也不会制造多余的重合成。
 fn drop_temp_topmost(win: tauri::WebviewWindow) {
     std::thread::spawn(move || {
         for _ in 0..22 {
             // 桌面又回到前台了（`Win+D` 连按、桌面动画回弹、钩子给了两拍相反的
-            // 前台事件）：这一步**必须放手**。落回会真的把卡片摘出置顶层，摘完
-            // 桌面还在前台就是实打实地被盖住，等下一轮抬高又是一次可见的闪。
+            // 前台事件）：这一步**必须放手**。落回会把卡片重新插到（可能又在
+            // 升高的）桌面正上方，倒也无害；但按旧剧本"桌面在前台"时卡片该
+            // 保持跟着桌面，这里续上账本再由抬高路径接管。
             let mine = widget_hwnds(win.app_handle());
             if desktop::desktop_showing(&mine) {
                 temp_top_flag(win.label()).store(true, Ordering::Relaxed);
@@ -629,8 +635,8 @@ fn on_widget_click_outside(root: isize) {
     let _ = app.emit(CLICK_OUTSIDE_EVENT, hit.unwrap_or(""));
 }
 
-/// 把一张卡片临时抬起来。调用方必须先确认"桌面真的盖住了它"，见
-/// `on_desktop_foreground`。
+/// 把一张卡片临时贴到桌面正上方（桌面正被抬起来）。调用方必须先确认"桌面
+/// 真的盖住了它"，见 `on_desktop_foreground`。
 fn raise_for_desktop(app: &AppHandle, label: &str) {
     if !wants_visible(label).load(Ordering::Relaxed) || is_adjusting(label) {
         return;
@@ -640,7 +646,7 @@ fn raise_for_desktop(app: &AppHandle, label: &str) {
         return;
     }
     if let Some(win) = app.get_webview_window(label) {
-        raise_temp_topmost(&win);
+        stick_for_desktop(&win);
         temp_top_flag(label).store(true, Ordering::Relaxed);
     }
 }
@@ -648,13 +654,12 @@ fn raise_for_desktop(app: &AppHandle, label: &str) {
 /// 桌面被抬到最前 / 又收起的即时反应。
 ///
 /// 这是 `Win+D` 不闪的关键：轮询最快也要等一个间隔，中间那几帧卡片是被桌面
-/// 盖住的；而前台事件在桌面被抬起的同一刻就到，遮挡和抬高几乎同时发生。
+/// 盖住的；而前台事件在桌面被抬起的同一刻就到，遮挡和贴位几乎同时发生。
 ///
 /// 触发条件不能只看"前台窗口是桌面"——**点一下桌面就算**，哪怕卡片在另一块
-/// 屏上正被一个最大化的程序盖着。那种时候把卡片提到置顶层，它就会压到用户
-/// 正在看的程序上面（实测：副屏放卡片，副屏最大化预览器，在主屏点桌面，两张
-/// 卡片同时浮到预览器之上）。所以动手之前先确认桌面**真的在栈顶、或者真的
-/// 盖住了这张卡片**，两个判据任一成立才抬。
+/// 屏上正被一个最大化的程序盖着。那种时候把卡片贴到桌面正上方没问题（桌面
+/// 没占上栈顶，贴了也等于贴在栈底），但为省一次无谓的重排，仍先确认桌面
+/// **真的在栈顶、或者真的盖住了这张卡片**，两个判据任一成立才动。
 fn on_desktop_foreground(desktop_in_front: bool) {
     let Some(app) = APP_HANDLE.get() else {
         return;
@@ -732,11 +737,13 @@ fn desktop_is_up(app: &AppHandle) -> bool {
 /// Windows does two things behind an app's back, and both are handled here:
 ///
 /// * **显示桌面 (`Win+D`)** raises the desktop window above every ordinary
-///   window. Measured on Win11 26100 (`.verify/exp_wind_d4.py`): a bottom-most
-///   window is *covered*, not hidden; a topmost one stays visible; `SetParent`
-///   into the desktop (what DeskBox does) works too but changes the coordinate
-///   space of the window and has to be re-done when Explorer restarts. So a
-///   widget goes topmost **only while the desktop is in front**.
+///   window. Measured on Win11 26100 (`.verify/exp_follow_desktop.py`): the
+///   fix is to keep a widget glued to the slot **immediately above the
+///   desktop window** - it rises with the desktop and drops back with it,
+///   so it is never above any ordinary window (the old
+///   raise-to-`HWND_TOPMOST` approach floated the card above the windows
+///   still playing their minimize animation, which read as "预览器被压在
+///   卡片下面").
 ///   This loop is *not* what makes that fast enough to be invisible - the
 ///   foreground hook in `desktop::watch_foreground` is. This is the fallback
 ///   for the case where the hook event is lost, and the place that puts a
@@ -786,28 +793,28 @@ fn spawn_widget_guard(app: AppHandle) {
                 continue;
             }
 
-            // 只有两种情况允许卡片待在置顶层：
+            // 只有两种情况卡片该跟着桌面走（贴到桌面正上方）：
             //   ① 桌面**真的盖住了它**（像素命中，硬证据）；
             //   ② 桌面占着前台（前台是桌面，且桌面在普通窗口栈顶）。
             // ② 里的"前台"这一条是 2026-11-11 补的：全屏预览器会把自己抬成置顶、
             // 标题还可能为空，`desktop_on_top` 把它们整排跳过，只按 z 序会得出
-            // "桌面还在最前面"的假答案，于是卡片被一直续着置顶，压在用户刚恢复的
+            // "桌面还在最前面"的假答案，于是卡片被一直续着跟桌面，压在用户刚恢复的
             // 预览器上。前台窗口不会骗人 —— 用户正在用的那个窗口才在前台。
+            // `stick_to_desktop` 幂等：已就位时是 no-op，不会制造重合成。
             if desktop::covered_by_desktop(&win) || desktop_front {
-                if !temp_top_flag(label).load(Ordering::Relaxed) {
-                    raise_temp_topmost(&win);
-                    temp_top_flag(label).store(true, Ordering::Relaxed);
-                }
+                temp_top_flag(label).store(true, Ordering::Relaxed);
+                stick_for_desktop(&win);
                 continue;
             }
 
-            // 其余情况：卡片必须贴在桌面层。`place_at_desktop_level` 是幂等的
-            // （已经在那儿就什么都不做），所以这里不用再看"高不高""要不要等两轮"——
-            // 那种延时正是"卡片压着程序过了半秒"的来源。残留的 WS_EX_TOPMOST、
-            // 被点击顶上去、恢复动画留下的半空位置，都会在这一步被一起收回来
-            // （先显式 `HWND_NOTOPMOST` 摘位，再插到锚点下面 —— 只插不摘是摘不掉的）。
+            // 其余情况：卡片必须贴在桌面层（= 窗口栈最底）。`stick_to_desktop`
+            // 是幂等的（已经在那儿就什么都不做），所以这里不用再看"高不高"
+            // "要不要等两轮"——那种延时正是"卡片压着程序过了半秒"的来源。残留的
+            // WS_EX_TOPMOST（保险丝路径留下的）、被点击顶上去、恢复动画留下的
+            // 半空位置，都会在这一步被一起收回来（先显式 `HWND_NOTOPMOST` 摘位，
+            // 再插到桌面正上方 —— 只插不摘是摘不掉的）。
             temp_top_flag(label).store(false, Ordering::Relaxed);
-            if place_widget_level(&win) && drop_log_due(label) {
+            if place_widget_level(&win) && z_log_due(label) {
                 launchlog::log(&format!(
                     "z: {label} 落回桌面层（前台={} 置顶={} 桌面在前={})",
                     desktop::foreground_class(),
