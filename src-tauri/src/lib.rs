@@ -409,7 +409,10 @@ mod desktop {
         false
     }
     pub fn set_topmost(_win: &WebviewWindow) {}
-    pub fn place_at_desktop_level(_win: &WebviewWindow) {}
+    pub fn is_topmost(_win: &WebviewWindow) -> bool {
+        false
+    }
+    pub fn place_at_desktop_level(_win: &WebviewWindow, _ignore: &[isize]) {}
     pub fn floats_above_apps(_win: &WebviewWindow) -> bool {
         false
     }
@@ -494,8 +497,18 @@ fn apply_widget_level(win: &tauri::WebviewWindow, on_top: bool) {
     } else {
         // 落点是"紧贴桌面上方"，不是"全栈最底"：桌面自己的 z 序会变（Win+D
         // 时被抬到最上面），压到最底的窗口会在它回落的那几帧里被盖住。
-        desktop::place_at_desktop_level(win);
+        place_widget_level(win);
     }
+}
+
+/// 把一张卡片贴回桌面层，顺手把另一张卡片从锚点候选里排掉。
+///
+/// 两张卡片都停在桌面正上方，互为邻居。不排掉的话，各自的 `place_at_desktop_level`
+/// 都会把对方当成"挡在桌面之上的那个窗口"，于是把自己搬到对方下面，再来一轮 ——
+/// 每次搬运都是一次重合成，连着几十次就是肉眼可见的持续轻闪。
+fn place_widget_level(win: &tauri::WebviewWindow) {
+    let mine = widget_hwnds(win.app_handle());
+    desktop::place_at_desktop_level(win, &mine);
 }
 
 /// Apply the remembered 置顶 choice and the locked-by-default state.
@@ -538,7 +551,7 @@ fn raise_temp_topmost(win: &tauri::WebviewWindow) {
 fn drop_temp_topmost(win: tauri::WebviewWindow) {
     std::thread::spawn(move || {
         for _ in 0..22 {
-            desktop::place_at_desktop_level(&win);
+            place_widget_level(&win);
             std::thread::sleep(Duration::from_millis(12));
         }
     });
@@ -645,21 +658,42 @@ fn on_desktop_foreground(desktop_in_front: bool) {
     }
 
     if undecided {
-        // Win+D 的时序是「先把桌面抬起来、再切前台」，钩子偶尔赶在这一步之前。
-        // 等一帧按 z 序再看一眼，别白白错过、留给 250ms 的轮询去兜。判据仍然
-        // 只认「桌面在栈顶」，所以"点了下桌面"那一下不会被误判成显示桌面。
+        // Win+D 的时序是「先抬桌面、再切前台」，钩子几乎总赶在前半步：实测
+        // （`.verify/diag_wind4_timeline.py`）桌面在事件之后约 6ms 才升到普通窗口
+        // 栈顶。所以这里**不能**固定等一个时长再复检 —— 等 45ms 就是让卡片被
+        // 桌面实实在在地盖住 40ms（两三帧），用户看到的就是"闪一下"。
+        // 改成 2ms 一探：桌面一上来同一帧就抬手，遮挡压到一帧以内；如果用户只是
+        // 点了下桌面（不是显示桌面），桌面永远不上升，这一轮什么都不做。
         let app = app.clone();
         std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(45));
-            let mine = widget_hwnds(&app);
-            if !desktop::desktop_on_top(&mine) {
-                return;
-            }
-            for label in ["monitor", "weather"] {
-                raise_for_desktop(&app, label);
+            for _ in 0..30 {
+                if desktop_is_up(&app) {
+                    for label in ["monitor", "weather"] {
+                        raise_for_desktop(&app, label);
+                    }
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(2));
             }
         });
     }
+}
+
+/// 桌面此刻是不是盖在卡片之上（要么它升到了普通窗口栈顶，要么它真的把卡片
+/// 盖住了）。
+///
+/// 两个判据任一成立即可：Win+D 的一瞬间是前者先成立，而桌面换壁纸/动态壁纸
+/// 那类场景里 `Progman` 可能压根进不了我们的 z 序枚举，只能用像素命中判。
+fn desktop_is_up(app: &AppHandle) -> bool {
+    let mine = widget_hwnds(app);
+    if desktop::desktop_on_top(&mine) {
+        return true;
+    }
+    ["monitor", "weather"].into_iter().any(|label| {
+        app.get_webview_window(label)
+            .map(|win| desktop::covered_by_desktop(&win))
+            .unwrap_or(false)
+    })
 }
 
 /// Keep the widgets where the user expects them, a few times a second.
@@ -710,24 +744,46 @@ fn spawn_widget_guard(app: AppHandle) {
             }
 
             let counter = desktop_gone_counter(label);
+
+            // 桌面不在前面，卡片身上却挂着 `WS_EX_TOPMOST`，而且不是我们记在
+            // 「临时置顶」账上的 —— 这是残留。全屏程序、shell 动画、丢掉的落回
+            // 事件都会留下它，而置顶的卡片就压在用户眼前的程序上，直到下一次
+            // 什么事件把它撞下来（"被卡片压在下面几秒"）。只认窗口上的实际样式位。
+            if !desktop_up
+                && !temp_top_flag(label).load(Ordering::Relaxed)
+                && desktop::is_topmost(&win)
+            {
+                place_widget_level(&win);
+                counter.store(0, Ordering::Relaxed);
+                continue;
+            }
+
+            if desktop_up {
+                // 桌面在最前面（Win+D）：卡片不置顶就会被它盖住。
+                if !temp_top_flag(label).load(Ordering::Relaxed) {
+                    raise_temp_topmost(&win);
+                    temp_top_flag(label).store(true, Ordering::Relaxed);
+                }
+                counter.store(0, Ordering::Relaxed);
+                continue;
+            }
+
+            // 桌面不在前面了：卡片必须落在桌面层。压着普通程序就**立刻**落回，
+            // 不等第二轮 —— 那一轮就是半秒，用户看到的是"卡片压着全屏窗口"。
+            if desktop::floats_above_apps(&win) {
+                temp_top_flag(label).store(false, Ordering::Relaxed);
+                place_widget_level(&win);
+                counter.store(0, Ordering::Relaxed);
+                continue;
+            }
+
             if temp_top_flag(label).load(Ordering::Relaxed) {
-                // 已经在"显示桌面"里被抬起来了：桌面一收起就落回底部。
-                if desktop_up {
-                    counter.store(0, Ordering::Relaxed);
-                } else if counter.fetch_add(1, Ordering::Relaxed) + 1 >= 2 {
+                // 抬过、但桌面已经收起且没压着谁：连中两轮才落回，避开切换途中
+                // 那一帧抖动把窗口按到桌面底下再抬起来。
+                if counter.fetch_add(1, Ordering::Relaxed) + 1 >= 2 {
                     temp_top_flag(label).store(false, Ordering::Relaxed);
                     drop_temp_topmost(win);
-                    continue;
                 }
-            } else if desktop::covered_by_desktop(&win) {
-                raise_temp_topmost(&win);
-                temp_top_flag(label).store(true, Ordering::Relaxed);
-                counter.store(0, Ordering::Relaxed);
-            } else if desktop::floats_above_apps(&win) {
-                // 兜底校准：卡片偏高了就贴回桌面上方。点击、恢复动画、第三方
-                // shell 都可能把它顶上去，而"紧贴桌面"这个位置是幂等的 ——
-                // 已经在那儿时 `place_at_desktop_level` 什么都不做。
-                desktop::place_at_desktop_level(&win);
             }
         }
     });
@@ -755,7 +811,7 @@ fn settle_widget(app: AppHandle, label: String) {
                 return;
             }
             if let Some(win) = app.get_webview_window(&label) {
-                desktop::place_at_desktop_level(&win);
+                place_widget_level(&win);
             }
         }
     });

@@ -275,26 +275,45 @@ pub fn set_topmost(win: &WebviewWindow) {
     }
 }
 
-/// 桌面窗口（`Progman`，没有就退而求其次找 `WorkerW`）以及它**上面**那个
-/// 普通窗口。
+/// 桌面窗口（`Progman`，没有就退而求其次找 `WorkerW`）、它**上面**那个普通
+/// 窗口，以及"我已经在这一串里了"。
 ///
-/// 返回值里的第二项是"桌面正上方"的锚点：把悬浮窗插到它下面，窗口就落在
-/// 桌面之上、所有普通窗口之下。找不到桌面时返回 `None`。
-fn desktop_and_anchor() -> Option<(*mut c_void, *mut c_void)> {
+/// 第二项是"桌面正上方"的锚点：把悬浮窗插到它下面，窗口就落在桌面之上、所有
+/// 普通窗口之下。`ignore` 是同一个进程里的**其他**悬浮窗 —— 它们同样贴在桌面
+/// 正上方，算锚点时必须跳过，否则两张卡片会把彼此当成锚点来回搬运（A 说"我要
+/// 贴桌面，所以我要搬到 B 下面"，B 说"我要贴桌面，所以我要搬到 A 下面"），每次
+/// `SetWindowPos` 都是一次重合成，肉眼看到的就是持续轻闪。
+///
+/// 第三项解决同一个问题的另一半：我本来就夹在"桌面正上方那一串"里时不用再动，
+/// 哪怕旁边还站着另一张卡片。找不到桌面时返回 `None`。
+fn desktop_slot(
+    hwnd: *mut c_void,
+    ignore: &[isize],
+) -> Option<(*mut c_void, *mut c_void, bool)> {
     for wanted in ["Progman", "WorkerW"] {
         // 从栈顶往下走。跳过的只有隐藏窗口和置顶窗口：后者是任务栏、输入法
         // 这类浮层，把卡片插到它们下面会让卡片也变成置顶的。
         let mut h = unsafe { GetTopWindow(std::ptr::null_mut()) };
         let mut anchor: *mut c_void = std::ptr::null_mut();
+        let mut seen_self = false;
+        let mut clean_below_self = true;
         while !h.is_null() {
             // SAFETY: 全部只读查询，h 来自上面的 z 序枚举。
             let (visible, ex) =
                 unsafe { (IsWindowVisible(h) != 0, GetWindowLongPtrW(h, GWL_EXSTYLE)) };
             if visible && ex & WS_EX_TOPMOST == 0 {
                 if class_name(h) == wanted {
-                    return Some((h, anchor));
+                    return Some((h, anchor, seen_self && clean_below_self));
                 }
-                anchor = h;
+                if h == hwnd {
+                    seen_self = true;
+                } else if !ignore.iter().any(|x| *x == h as isize) {
+                    // 我自己和我的同伙都不当锚点，也都不算"挡在我下面"。
+                    anchor = h;
+                    if seen_self {
+                        clean_below_self = false;
+                    }
+                }
             }
             // SAFETY: 沿着 z 序往下走一格。
             h = unsafe { GetWindow(h, GW_HWNDNEXT) };
@@ -315,20 +334,20 @@ fn desktop_and_anchor() -> Option<(*mut c_void, *mut c_void)> {
 /// 顺带解决了另一个问题：`SetWindowPos` 的目标是普通层窗口，置顶的窗口会被
 /// 自动摘掉 `WS_EX_TOPMOST`，退出置顶和重新定位合并成一次调用，中间不会出现
 /// "已退出置顶但还在最上面"的合成帧。
-pub fn place_at_desktop_level(win: &WebviewWindow) {
+pub fn place_at_desktop_level(win: &WebviewWindow, ignore: &[isize]) {
     let Some(hwnd) = handle(win) else {
         return;
     };
-    let Some((_desktop, anchor)) = desktop_and_anchor() else {
+    let Some((_desktop, anchor, placed)) = desktop_slot(hwnd, ignore) else {
         // 找不到桌面（极少见）：退回原来的最底层。
         to_bottom(win);
         return;
     };
-    // 锚点就是自己 = 已经贴在桌面正上方，不用再动。挪一下只会多一次重合成。
-    if anchor == hwnd {
+    // 已经贴在桌面正上方了，不用再动。挪一下只会多一次重合成。
+    if placed {
         return;
     }
-    // SAFETY: 只改 z 序；`HWND_TOP` 是常量 0。
+    // SAFETY: 只改 z 序；`HWND_TOP` 是空指针。
     unsafe {
         SetWindowPos(
             hwnd,
@@ -340,6 +359,19 @@ pub fn place_at_desktop_level(win: &WebviewWindow) {
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER,
         );
     }
+}
+
+/// 窗口身上现在挂着 `WS_EX_TOPMOST` 吗。
+///
+/// 兜底校准用：临时置顶是"桌面在最前面"期间才成立的借据，桌面一收就得还。
+/// 状态位可能因为丢事件、全屏程序抢层级、shell 动画而错乱，所以判断时只认
+/// 窗口上的**实际样式位**，不认我们记的那几个 `AtomicBool`。
+pub fn is_topmost(win: &WebviewWindow) -> bool {
+    let Some(hwnd) = handle(win) else {
+        return false;
+    };
+    // SAFETY: 只读查询。
+    unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST != 0 }
 }
 
 /// 窗口是不是浮在某个普通窗口上面了（本该紧贴桌面，却压着别人）。
