@@ -400,6 +400,10 @@ mod desktop {
     pub fn hidden_by_shell(_win: &WebviewWindow) -> bool {
         false
     }
+    pub fn is_minimized(_win: &WebviewWindow) -> bool {
+        false
+    }
+    pub fn restore_window(_win: &WebviewWindow) {}
     pub fn covered_by_desktop(_win: &WebviewWindow) -> bool {
         false
     }
@@ -762,6 +766,17 @@ fn spawn_widget_guard(app: AppHandle) {
             let Some(win) = app.get_webview_window(label) else {
                 continue;
             };
+            // 有些 Windows 版本（Win10 时代）的"显示桌面"是真最小化，而不是抬
+            // 桌面。卡片没有最小化入口，`IsIconic` 为真就只能是系统干的：显式
+            // `SW_RESTORE` 叫回来。**不能只靠下面的 `win.show()`** —— `SW_SHOW`
+            // 不恢复最小化状态，会一直卡在图标化（`verify_restore_minimized.py`）。
+            if desktop::is_minimized(&win) {
+                desktop::restore_window(&win);
+                launchlog::log(&format!(
+                    "z: {label} 被系统最小化，已恢复（前台={}）",
+                    desktop::foreground_class(),
+                ));
+            }
             if desktop::hidden_by_shell(&win) {
                 let _ = win.show();
                 apply_widget_level(&win, on_top_flag(label).load(Ordering::Relaxed));
@@ -790,7 +805,7 @@ fn spawn_widget_guard(app: AppHandle) {
             // （已经在那儿就什么都不做），所以这里不用再看"高不高""要不要等两轮"——
             // 那种延时正是"卡片压着程序过了半秒"的来源。残留的 WS_EX_TOPMOST、
             // 被点击顶上去、恢复动画留下的半空位置，都会在这一步被一起收回来
-            // （插到普通窗口下面会自动摘掉置顶位）。
+            // （先显式 `HWND_NOTOPMOST` 摘位，再插到锚点下面 —— 只插不摘是摘不掉的）。
             temp_top_flag(label).store(false, Ordering::Relaxed);
             if place_widget_level(&win) && drop_log_due(label) {
                 launchlog::log(&format!(

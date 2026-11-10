@@ -38,6 +38,7 @@ const SWP_FRAMECHANGED: u32 = 0x0020;
 const SWP_NOOWNERZORDER: u32 = 0x0200;
 
 const GA_ROOT: u32 = 2;
+const SW_RESTORE: i32 = 9;
 
 const EVENT_SYSTEM_FOREGROUND: u32 = 0x0003;
 const WINEVENT_OUTOFCONTEXT: u32 = 0x0000;
@@ -88,6 +89,7 @@ extern "system" {
     fn GetAncestor(hwnd: *mut c_void, flags: u32) -> *mut c_void;
     fn IsWindowVisible(hwnd: *mut c_void) -> i32;
     fn IsIconic(hwnd: *mut c_void) -> i32;
+    fn ShowWindow(hwnd: *mut c_void, cmd: i32) -> i32;
     fn GetTopWindow(hwnd: *mut c_void) -> *mut c_void;
     fn GetForegroundWindow() -> *mut c_void;
     fn GetWindow(hwnd: *mut c_void, cmd: u32) -> *mut c_void;
@@ -167,6 +169,36 @@ pub fn set_no_activate(win: &WebviewWindow, on: bool) {
 ///
 /// 注意不能只看"被盖住"：`Win+D` 之后窗口是可见的，只是被桌面压住了，
 /// 那是另一个分支。
+/// 窗口被判成"图标化"了吗（`IsIconic`）。
+///
+/// `Win+D` 在不同 Windows 版本上的实现不一样：本机 Win11 26100 是**把 `Progman`
+/// 抬到所有窗口之上**（`.verify/exp_wind4_minimize.py` 对照实验：普通窗口 / 工具
+/// 窗口 / 卡片全都没被最小化、也没被 cloak），所以只要临时置顶就能活下来。但
+/// Win10 时代它是真给窗口发 `SC_MINIMIZE`。卡片本身没有任何最小化入口，一旦
+/// `IsIconic` 为真就只能是系统干的 —— 那就得显式叫回来。
+pub fn is_minimized(win: &WebviewWindow) -> bool {
+    let Some(hwnd) = handle(win) else {
+        return false;
+    };
+    // SAFETY: 只读查询。
+    unsafe { IsIconic(hwnd) != 0 }
+}
+
+/// 把被最小化的窗口叫回来。
+///
+/// **必须 `SW_RESTORE`**：`ShowWindow(SW_SHOW)` 对已经最小化的窗口不恢复（只是
+/// 让它在最小化状态下"可见"），`verify_restore_minimized.py` 实测过 —— 只靠
+/// tao 的 `win.show()` 会一直卡在 `IsIconic=1`，守护线程每 250ms 白喊一次。
+pub fn restore_window(win: &WebviewWindow) {
+    let Some(hwnd) = handle(win) else {
+        return;
+    };
+    // SAFETY: 只改窗口的显示状态。
+    unsafe {
+        ShowWindow(hwnd, SW_RESTORE);
+    }
+}
+
 pub fn hidden_by_shell(win: &WebviewWindow) -> bool {
     let Some(hwnd) = handle(win) else {
         return false;
