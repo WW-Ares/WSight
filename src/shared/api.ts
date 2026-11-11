@@ -79,6 +79,17 @@ export const api = {
     invoke<void>("set_widget_adjust", { label, adjusting }),
 
   /**
+   * Move the widget by dragging it (调整 mode only).
+   *
+   * The backend runs the drag loop itself instead of the platform's caption
+   * drag: the native loop hands the window to Aero Snap as soon as the pointer
+   * touches a screen edge, which resizes the card to half a screen. See
+   * `drag_widget`.
+   */
+  dragWidget: (label: "monitor" | "weather") =>
+    invoke<void>("drag_widget", { label }),
+
+  /**
    * Put a widget back down after a click lifted it.
    *
    * The window is `WS_EX_NOACTIVATE`, so a click does not take focus - but

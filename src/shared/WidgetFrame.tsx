@@ -166,28 +166,31 @@ export function WidgetFrame({
     void api.setWidgetAlwaysOnTop(label, !onTop).catch(() => {});
   };
 
-  // Tauri starts a window drag from the element the mouse went down on, so the
-  // attribute has to be on the surface actually clicked - hence both the card
-  // and its header.
-  const dragRegion = adjusting ? "" : undefined;
+  // 拖动由后端自己转圈（`drag_widget`），不用 Tauri 的
+  // `data-tauri-drag-region`：那条走系统的移动循环，窗口一碰到屏幕边缘就被
+  // Aero Snap 改成半个屏幕（实测 404x295 → 640x994），「靠边吸附」直接失效。
+  // 只有调整模式才拖得动 —— 平时窗口是锁着的。
+  const startDrag = () => {
+    if (adjusting) void api.dragWidget(label).catch(() => {});
+  };
 
   return (
     <div className="stage" ref={stageRef}>
       <div
         className={`panel ${variant}${adjusting ? " adjusting" : ""}`}
-        data-tauri-drag-region={dragRegion}
         onContextMenu={(event) => {
           event.preventDefault();
           setMenu({ x: event.clientX, y: event.clientY });
         }}
-        onMouseDown={() => {
+        onMouseDown={(event) => {
           setMenu(null);
           // 点一下就会把窗口顶到最前面去（WebView2 干的，WS_EX_NOACTIVATE
           // 只挡焦点）。收回来，让它继续当桌面家具。
           void api.settleWidget(label).catch(() => {});
+          if (event.button === 0) startDrag();
         }}
       >
-        <div className="panel-header" data-tauri-drag-region={dragRegion}>
+        <div className="panel-header">
           <span className="panel-title">{title}</span>
           <span className="panel-sub">
             {adjusting ? (

@@ -174,30 +174,34 @@ const SNAP_ESCAPE_PX: f64 = 12.0;
 /// moving the window again.
 static SNAPPING: AtomicBool = AtomicBool::new(false);
 
-/// What the magnet needs to remember between one `Moved` and the next.
+/// What the magnet needs to remember between one call and the next.
 ///
 /// Nothing here is bookkeeping for its own sake - the window move loop makes
-/// all three necessary. It reports each `Moved` as *the position we last gave
-/// the window* plus the pointer's own delta, which means a snap we apply
-/// becomes the reference for the next event: the two pixels the pointer spent
-/// pulling away are added to the line instead of to the pointer's travel, and
-/// are gone. A widget under a real drag can therefore never escape a line, no
-/// matter how far it is pulled - which is exactly what "磁吸太紧，拖不动" is.
-/// So we keep the running total ourselves.
+/// it necessary. A `Moved` only says where the *window* went, and while a line
+/// is holding the widget the window goes nowhere: the drag loop keeps asking
+/// for the pointer's position, we keep putting the window back on the line.
+/// Measuring the pointer's travel off the window therefore either freezes the
+/// total (single-threshold magnets: "磁吸太紧，拖不动") or double-counts it.
+/// So the running total is advanced by the *pointer's* own delta, and the
+/// window position only serves as the value we correct.
 #[derive(Clone, Copy, Default)]
 struct SnapTrack {
-    /// The last position handed to the window - what the move loop measures from.
-    reported: Option<(f64, f64)>,
-    /// Where the widget would be if there were no magnet at all: `reported`
-    /// plus every movement the pointer has made while we were holding a line.
+    /// Where the widget would be if there were no magnet at all.
     free: Option<(f64, f64)>,
+    /// Pointer position (logical px) at the previous call, so the next one can
+    /// add a true pointer delta.
+    cursor: Option<(f64, f64)>,
+    /// Where the previous call left the window - the position this code asked
+    /// for. Anything else showing up here next time came from outside.
+    win: Option<(f64, f64)>,
     /// The line each axis is currently held by, in logical px.
     held: (Option<f64>, Option<f64>),
 }
 
 static SNAP: Mutex<SnapTrack> = Mutex::new(SnapTrack {
-    reported: None,
     free: None,
+    cursor: None,
+    win: None,
     held: (None, None),
 });
 
@@ -249,33 +253,22 @@ fn widget_rect(win: &tauri::WebviewWindow) -> Option<(f64, f64, f64, f64)> {
 /// keeps it until the pointer pulls past `SNAP_ESCAPE_PX`; only then is the
 /// field consulted again from scratch. Deciding afresh on every event - which
 /// is what a single threshold amounts to - is what makes a magnet feel stuck.
-fn snap_axis(
-    cur: f64,
-    len: f64,
-    other: f64,
-    other_len: f64,
-    held: Option<f64>,
-) -> (f64, Option<f64>) {
+///
+/// `lines` are the coordinates this axis may lock onto, in order of increasing
+/// preference for ties: screen edges first, the neighbour's alignment lines
+/// last (`<=` lets a later, equally close line win).
+fn snap_axis(cur: f64, lines: &[f64], held: Option<f64>) -> (f64, Option<f64>) {
     if let Some(line) = held {
         if (line - cur).abs() <= SNAP_ESCAPE_PX {
             return (line, Some(line));
         }
     }
 
-    let candidates = [
-        other,
-        other + other_len - len,
-        other + other_len,
-        other - len,
-        other + (other_len - len) / 2.0,
-    ];
     let mut best = cur;
     let mut best_gap = SNAP_PX;
     let mut lock = None;
-    for candidate in candidates {
+    for &candidate in lines {
         let gap = (candidate - cur).abs();
-        // `<=` so a later, equally close line wins - they are ordered
-        // near-edge first, which is the alignment a user reaches for most.
         if gap <= best_gap {
             best_gap = gap;
             best = candidate;
@@ -296,61 +289,131 @@ fn snap_axis(
 /// so the magnet decides on the tracked free position instead, and the reported
 /// one only serves to advance it.
 fn snap_widget(window: &tauri::Window) {
-    let label = window.label();
+    // 自己转圈的拖动会直接调 `snap_apply`；这里再算一次就是两边抢同一个
+    // 窗口位置（实测拖到一半卡住、或者冲出指针一大截）。
+    if DRAG_ACTIVE.load(Ordering::Relaxed) {
+        return;
+    }
+    snap_apply(window.app_handle(), window.label(), false);
+}
+
+/// `dragging` = 调用方是那条自绘拖动循环。
+///
+/// 只有一处区别：拖动**不吃**方向键的安静窗口。安静窗口是给"用户在用方向键
+/// 瞄一个像素"准备的，而按住标题栏拖动期间它就是一段凭空的卡顿。
+fn snap_apply(app_handle: &tauri::AppHandle, label: &str, dragging: bool) {
     if !is_adjusting(label) {
         return;
     }
     // Arrow keys are the user aiming at a pixel; the magnet stays out of it.
-    if now_ms() < NUDGE_UNTIL_MS.load(Ordering::SeqCst) {
+    if !dragging && now_ms() < NUDGE_UNTIL_MS.load(Ordering::SeqCst) {
         return;
     }
     if SNAPPING.swap(true, Ordering::SeqCst) {
         return;
     }
 
-    let app = window.app_handle();
+    let app = app_handle;
     let neighbour_label = if label == "monitor" { "weather" } else { "monitor" };
     if let Some(moving) = app.get_webview_window(label) {
-        if let Some(other) = app.get_webview_window(neighbour_label) {
+        if let Some((x, y, w, h)) = widget_rect(&moving) {
+            // 对齐线：**屏幕工作区边缘**（靠边吸附）+ **邻居卡片**的五种对齐。
+            //
+            // 工作区而不是整块屏幕：下边缘要让开任务栏，否则卡片会钻到任务栏
+            // 底下，用户再也点不到它。屏幕线放前面、邻居线放后面 —— `snap_axis`
+            // 里是 `<=`，平手时后面的赢，即"离哪条线一样近时优先对齐邻居"。
+            let mut xs: Vec<f64> = Vec::new();
+            let mut ys: Vec<f64> = Vec::new();
+            if let Ok(Some(mon)) = moving.current_monitor() {
+                let scale = mon.scale_factor() as f64;
+                let wa = mon.work_area();
+                let left = wa.position.x as f64 / scale;
+                let top = wa.position.y as f64 / scale;
+                let right = (wa.position.x as f64 + wa.size.width as f64) / scale;
+                let bottom = (wa.position.y as f64 + wa.size.height as f64) / scale;
+                xs.push(left);
+                xs.push(right - w);
+                ys.push(top);
+                ys.push(bottom - h);
+            }
             // A hidden neighbour is not on screen to align with - and its stored
             // rectangle would be the last place it was seen, which is worse than
-            // no snapping at all.
-            if other.is_visible().unwrap_or(false) {
-                if let (Some((x, y, w, h)), Some((ox, oy, ow, oh))) =
-                    (widget_rect(&moving), widget_rect(&other))
-                {
-                    let (free, held_x, held_y) = SNAP
-                        .lock()
-                        .map(|track| match (track.reported, track.free) {
-                            (Some(prev), Some(free)) => (
-                                (free.0 + (x - prev.0), free.1 + (y - prev.1)),
-                                track.held.0,
-                                track.held.1,
-                            ),
-                            _ => ((x, y), None, None),
-                        })
-                        .unwrap_or(((x, y), None, None));
-
-                    let (nx, lock_x) = snap_axis(free.0, w, ox, ow, held_x);
-                    let (ny, lock_y) = snap_axis(free.1, h, oy, oh, held_y);
-                    let applied = if (nx - x).abs() >= 0.5 || (ny - y).abs() >= 0.5 {
-                        if moving
-                            .set_position(tauri::LogicalPosition::new(nx, ny))
-                            .is_ok()
-                        {
-                            (nx, ny)
-                        } else {
-                            (x, y)
-                        }
-                    } else {
-                        (x, y)
-                    };
-
-                    if let Ok(mut track) = SNAP.lock() {
-                        track.reported = Some(applied);
-                        track.free = Some(free);
-                        track.held = (lock_x, lock_y);
+            // no neighbour lines at all. The screen lines stay either way.
+            if let Some(other) = app.get_webview_window(neighbour_label) {
+                if other.is_visible().unwrap_or(false) {
+                    if let Some((ox, oy, ow, oh)) = widget_rect(&other) {
+                        xs.extend([ox, ox + ow - w, ox + ow, ox - w, ox + (ow - w) / 2.0]);
+                        ys.extend([oy, oy + oh - h, oy + oh, oy - h, oy + (oh - h) / 2.0]);
                     }
+                }
+            }
+            if !xs.is_empty() {
+                // 指针此刻的位置（逻辑 px）。自由位置用它来累加，而不是用
+                // 窗口位移 —— 窗口被吸附按住时位移是 0 或跳变，拿它积分一定失真。
+                let scale = moving.scale_factor().unwrap_or(1.0);
+                let cursor = moving.cursor_position().ok().map(|p| {
+                    (p.x as f64 / scale as f64, p.y as f64 / scale as f64)
+                });
+                let (free, held_x, held_y) = SNAP
+                    .lock()
+                    .map(|track| {
+                        let pointer_moved = match (track.cursor, cursor) {
+                            (Some(prev), Some(cur)) => {
+                                cur.0 != prev.0 || cur.1 != prev.1
+                            }
+                            _ => false,
+                        };
+                        // 窗口没待在我们上次放的地方 = 有别人动过它。
+                        // 容差要容得下逻辑 ↔ 物理的取整（半个物理 px）。
+                        let window_moved = match track.win {
+                            Some((wx, wy)) => {
+                                (wx - x).abs() > 1.5 || (wy - y).abs() > 1.5
+                            }
+                            None => false,
+                        };
+                        match (track.free, track.cursor, cursor) {
+                            // 指针动过 = 真的在拖。按**指针位移**累加，因为窗口
+                            // 被吸附线按住时它的位移是 0 或跳变，拿它积分一定失真。
+                            (Some(free), Some(prev), Some(cur)) if pointer_moved => {
+                                (
+                                    (free.0 + (cur.0 - prev.0), free.1 + (cur.1 - prev.1)),
+                                    track.held.0,
+                                    track.held.1,
+                                )
+                            }
+                            // 指针一寸没动、窗口却换了地方 —— 是**别的东西**挪的：
+                            // 方向键微调、进出「调整」、换屏还原、外部 SetWindowPos。
+                            // 自由位置改从窗口现在的位置起算，否则会拿上一次拖动
+                            // 留下的老位置把窗口**拽回原地**（摆到 A 点自己弹回 B 点）。
+                            // 吸附锁定**先留着**：`snap_axis` 自己会在超出 12 逻辑 px
+                            // 时松手，而"吸住之后再拨开 10px 仍要吸住"正是那个排斥区。
+                            // 拖动期间**不看窗口读数**：`set_position` 是异步的，
+                            // 下一帧读到的往往是上一跳的位置，看起来就像"别人动过"。
+                            // 拿它重置 free，等于把刚攒起来的指针行程扔掉（实测
+                            // 窗口读数会稳定落后自由位置约一跳），偶发就出在这里。
+                            // 拖动时自由位置只由指针说了算。
+                            (Some(_), _, _) if window_moved && !dragging => {
+                                ((x, y), track.held.0, track.held.1)
+                            }
+                            (Some(free), _, _) => (free, track.held.0, track.held.1),
+                            _ => ((x, y), None, None),
+                        }
+                    })
+                    .unwrap_or(((x, y), None, None));
+
+                let (nx, lock_x) = snap_axis(free.0, &xs, held_x);
+                let (ny, lock_y) = snap_axis(free.1, &ys, held_y);
+                let moved = (nx - x).abs() >= 0.5 || (ny - y).abs() >= 0.5;
+                if moved {
+                    let _ = moving.set_position(tauri::LogicalPosition::new(nx, ny));
+                }
+
+                if let Ok(mut track) = SNAP.lock() {
+                    track.free = Some(free);
+                    track.cursor = cursor;
+                    // 记"我们让它待的地方"，下次好认出外人插的手。没动就是原地。
+                    track.win = Some(if moved { (nx, ny) } else { (x, y) });
+                    track.held = (lock_x, lock_y);
                 }
             }
         }
@@ -391,6 +454,30 @@ static ON_TOP_WEATHER: AtomicBool = AtomicBool::new(false);
 static TEMP_TOP_MONITOR: AtomicBool = AtomicBool::new(false);
 static TEMP_TOP_WEATHER: AtomicBool = AtomicBool::new(false);
 
+/// 前端最近一次要求的高度（逻辑 px 的 f64 位模式，0 = 还没报过）。
+///
+/// 窗口高度归内容管：前端量出自然高度就发过来。可这是一条**没有回执**的
+/// 命令 —— 原生拖拽循环正在跑的时候，`set_size` 会被它当场覆盖掉，而覆盖
+/// 之后不一定还有新的 resize 事件来触发下一次上报。结果就是窗口停在用户
+/// 拖到的高度上、内容被裁掉一截，而且再也不会自己长回来（"有时候高度不
+/// 自动调整，显示不全"）。所以把要求值记下来，由守护线程对账。
+static FIT_H_MONITOR: AtomicU64 = AtomicU64::new(0);
+static FIT_H_WEATHER: AtomicU64 = AtomicU64::new(0);
+
+/// 对账踩刹车用：(上次试过的目标高度, 时刻, 那一次看到的实际高度)。
+///
+/// 刹车只在**没有进展**的时候踩：实际高度和上次看到的一样 → 说明这一下多半
+/// 白撞了（原生拖拽把 `set_size` 吞了，或者系统把窗口钉住了），歇半秒再说；
+/// 高度变了 → 用户还在拖，值得立刻再对一次。
+///
+/// 半秒，不是两秒：拖拽刚结束的那一刻，"上一次尝试被吞掉"和"用户松手了、高度
+/// 当然不变"长得一模一样，判据分不开。两秒的刹车会让收尾那次对账整整晚两秒，
+/// 落在用户眼里就是"有时候高度不自动调整"（实测见 `verify_fit_height` 第 2/4 轮）。
+static FIT_TRY_MONITOR: [AtomicU64; 3] =
+    [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
+static FIT_TRY_WEATHER: [AtomicU64; 3] =
+    [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
+
 /// Windows-only counterpart of the block above: there is no portable version of
 /// "a tool window that ignores activation and still shows after 显示桌面", so
 /// every other platform gets no-ops.
@@ -416,6 +503,18 @@ mod desktop {
     pub fn stick_to_desktop(_win: &WebviewWindow, _ignore: &[isize]) -> bool {
         false
     }
+    pub fn stick_hwnd(_hwnd: isize, _ignore: &[isize]) -> bool {
+        false
+    }
+    pub fn desktop_hwnd() -> Option<isize> {
+        None
+    }
+    pub fn desktop_above(_hwnd: isize, _desktop: isize) -> bool {
+        false
+    }
+    pub fn sits_on_desktop_hwnd(_hwnd: isize, _desktop: isize, _ignore: &[isize]) -> bool {
+        false
+    }
     pub fn desktop_on_top(_ignore: &[isize]) -> bool {
         false
     }
@@ -426,6 +525,9 @@ mod desktop {
         String::new()
     }
     pub fn to_bottom(_win: &WebviewWindow) {}
+    pub fn left_button_down() -> bool {
+        false
+    }
     pub fn watch_foreground(_sink: fn(bool)) {}
     pub fn watch_click_outside(_sink: fn(isize)) {}
 }
@@ -732,6 +834,76 @@ fn desktop_is_up(app: &AppHandle) -> bool {
     })
 }
 
+/// Win+D 的前台事件有一个盲区：**桌面已经占着前台**（用户刚点过桌面）时再按
+/// Win+D，前台没有变化，`EVENT_SYSTEM_FOREGROUND` 根本不发，等 250ms 守护线程
+/// 兜底就是肉眼可见的一闪（大王实测：这种状态下必然闪现）。
+///
+/// 这个线程只做一件极轻的事：每 4ms 看一眼"桌面是不是压到卡片上面了"，是就
+/// 同一帧贴回桌面正上方。常态开销 ≈ 每卡 2 次 `GetWindow`（`sits_on_desktop`
+/// 快检两格命中），只有发现异常才沿 z 序上溯，不查类名只比句柄整数。
+///
+/// 它只管"被桌面盖住"这一种扰动：点击浮起有 `settle_widget`、层级错杂有
+/// 250ms 守护线程，各管各的，互不打架。
+fn spawn_desktop_shadow(app: AppHandle) {
+    std::thread::spawn(move || {
+        // (label, hwnd)；窗口重建后句柄会变，~1s 刷新一次。
+        let mut cards: [(&'static str, isize); 2] = [("monitor", 0), ("weather", 0)];
+        let mut desk: Option<isize> = None;
+        let mut fails = [0u8; 2];
+        let mut tick = 0u32;
+        loop {
+            std::thread::sleep(Duration::from_millis(4));
+            tick = tick.wrapping_add(1);
+            if tick % 250 == 1 || desk.is_none() {
+                desk = desktop::desktop_hwnd();
+                for slot in &mut cards {
+                    slot.1 = app
+                        .get_webview_window(slot.0)
+                        .and_then(|w| w.hwnd().ok())
+                        .map(|h| h.0 as isize)
+                        .unwrap_or(0);
+                }
+            }
+            let Some(d) = desk else { continue };
+            let mine: Vec<isize> = cards
+                .iter()
+                .map(|&(_, h)| h)
+                .filter(|&h| h != 0)
+                .collect();
+            for (i, &(label, h)) in cards.iter().enumerate() {
+                if h == 0 || fails[i] >= 3 {
+                    // 连贴 3 次还是被压（桌面进了置顶层那类形态）：放手，
+                    // 交给 250ms 守护线程 + stick 的保险丝，别每 4ms 白挪一次。
+                    continue;
+                }
+                if !wants_visible(label).load(Ordering::Relaxed)
+                    || is_adjusting(label)
+                    || on_top_flag(label).load(Ordering::Relaxed)
+                {
+                    continue;
+                }
+                // 常态快检：已经贴在桌面上就什么都不用做。
+                if desktop::sits_on_desktop_hwnd(h, d, &mine) {
+                    fails[i] = 0;
+                    continue;
+                }
+                if desktop::desktop_above(h, d) {
+                    desktop::stick_hwnd(h, &mine);
+                    // 记账"被桌面盖过"：桌面收起前 `settle_widget` 不该把它压回去。
+                    temp_top_flag(label).store(true, Ordering::Relaxed);
+                    if desktop::desktop_above(h, d) {
+                        fails[i] += 1;
+                    } else {
+                        fails[i] = 0;
+                    }
+                } else {
+                    fails[i] = 0;
+                }
+            }
+        }
+    });
+}
+
 /// Keep the widgets where the user expects them, a few times a second.
 ///
 /// Windows does two things behind an app's back, and both are handled here:
@@ -767,7 +939,14 @@ fn spawn_widget_guard(app: AppHandle) {
         let desktop_front = desktop::desktop_showing(&mine);
 
         for label in ["monitor", "weather"] {
-            if !wants_visible(label).load(Ordering::Relaxed) || is_adjusting(label) {
+            if !wants_visible(label).load(Ordering::Relaxed) {
+                continue;
+            }
+            // 高度归内容管（见 `FIT_H_*`）：**调整模式下也要对账** —— 用户拖底边
+            // 只是改了窗口高度，内容高度没变，它必须自己长回来。这一条要是放到
+            // `is_adjusting` 后面，就正好把大王报的那个 bug 留在原地。
+            reassert_fit_height(&app, label);
+            if is_adjusting(label) {
                 continue;
             }
             let Some(win) = app.get_webview_window(label) else {
@@ -1232,6 +1411,8 @@ fn fit_widget_height(app: AppHandle, label: String, height: f64) {
         return;
     };
     let want_h = height.clamp(config::MIN_HEIGHT, config::MAX_HEIGHT);
+    // 记下内容要的高度：`set_size` 可能被原生拖拽循环当场覆盖，由守护线程对账。
+    fit_h_slot(&label).store(want_h.to_bits(), Ordering::Relaxed);
     let Some((cur_w, cur_h)) = logical_size(&win) else {
         return;
     };
@@ -1239,6 +1420,64 @@ fn fit_widget_height(app: AppHandle, label: String, height: f64) {
         return;
     }
     let _ = win.set_size(tauri::LogicalSize::new(cur_w, want_h));
+}
+
+fn fit_h_slot(label: &str) -> &'static AtomicU64 {
+    match label {
+        "monitor" => &FIT_H_MONITOR,
+        _ => &FIT_H_WEATHER,
+    }
+}
+
+fn fit_try_slot(label: &str) -> &'static [AtomicU64; 3] {
+    match label {
+        "monitor" => &FIT_TRY_MONITOR,
+        _ => &FIT_TRY_WEATHER,
+    }
+}
+
+/// 窗口高度和内容要求对不上时把它拉回去 —— 守护线程每轮调一次。
+///
+/// 只有一个场景会走到这里：`set_size` 被原生拖拽循环吞掉了（用户正拖着
+/// 窗口边缘），吞掉之后又没有新的 resize 事件来触发前端重报，窗口就停在
+/// 一个"内容放不下"的高度上。
+///
+/// 刹车按"有没有进展"下脚，不是按时间：同一个目标高度、实际高度也一动没动，
+/// 半秒内不再重试（窗口被系统钉死时别每 250ms 白撞一回）；高度只要变过，说明
+/// 用户还在拖、还有得商量，立刻再对一次。老版本一律 2 秒一次，结果"拖底边拉
+/// 高"两下里的第二下常常落在刹车间歇里，看着就像"有时候不自动调整"。
+fn reassert_fit_height(app: &AppHandle, label: &str) {
+    let bits = fit_h_slot(label).load(Ordering::Relaxed);
+    if bits == 0 {
+        return;
+    }
+    let want = f64::from_bits(bits);
+    let Some(win) = app.get_webview_window(label) else {
+        return;
+    };
+    let Some((cur_w, cur_h)) = logical_size(&win) else {
+        return;
+    };
+    if (cur_h - want).abs() < 1.5 {
+        return;
+    }
+    let try_slot = fit_try_slot(label);
+    let now = now_ms();
+    let last_h = f64::from_bits(try_slot[2].load(Ordering::Relaxed));
+    let no_progress = (last_h - cur_h).abs() < 1.0;
+    if try_slot[0].load(Ordering::Relaxed) == bits
+        && no_progress
+        && now.saturating_sub(try_slot[1].load(Ordering::Relaxed)) < 500
+    {
+        return;
+    }
+    try_slot[0].store(bits, Ordering::Relaxed);
+    try_slot[1].store(now, Ordering::Relaxed);
+    try_slot[2].store(cur_h.to_bits(), Ordering::Relaxed);
+    let _ = win.set_size(tauri::LogicalSize::new(cur_w, want));
+    launchlog::log(&format!(
+        "fit: {label} 高度对不上（{cur_h:.0} → {want:.0}，w={cur_w:.0}）已拉回"
+    ));
 }
 
 /// Persist a width the user dragged the window to, without resizing anything.
@@ -1478,6 +1717,57 @@ fn set_widget_adjust(app: AppHandle, label: String, adjusting: bool) -> Result<(
 /// The magnet is *not* part of this: nudging is the user placing the widget on
 /// an exact pixel, and a snap that undoes the step would make the keys useless
 /// anywhere near the neighbour.
+/// 正在拖动吗 —— `snap_widget`（Moved 事件那条路）看见它就别再动窗口，
+/// 磁吸由拖动线程自己算，两个方向抢同一个窗口只会互相抵消。
+static DRAG_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// 调整模式下按住卡片拖动。
+///
+/// **不用系统的标题栏拖拽**（Tauri 的 `data-tauri-drag-region` 走
+/// `WM_NCLBUTTONDOWN + HTCAPTION`）：那是系统的移动循环，窗口一旦被拖到屏幕
+/// 边缘，Aero Snap 就接管，把卡片改成半个屏幕 —— 实测 404x295 的卡片拖到副屏
+/// 左沿后变成 640x994（= 580x900 逻辑），连 `monitorWidth` 都被一起改写，
+/// 内容整块重排。所谓「屏幕边缘靠边磁吸有问题」就是这个。
+///
+/// 自己转圈只剩算术：每 4ms 让 `snap_apply` 拿指针位移累加一次自由位置、
+/// 算完吸附、落一次位置。整跳只有一次 `SetWindowPos`，而且磁吸和位移是同
+/// 一个数算出来的 —— 不会像系统拖拽那样把吸附抵消掉。
+#[tauri::command]
+fn drag_widget(app: AppHandle, label: String) {
+    if label != "monitor" && label != "weather" {
+        return;
+    }
+    if !is_adjusting(&label) {
+        return;
+    }
+    if DRAG_ACTIVE.swap(true, Ordering::SeqCst) {
+        return; // 已经在拖了（左键连点、标题栏和面板都发了一次）
+    }
+    if app.get_webview_window(&label).is_none() {
+        DRAG_ACTIVE.store(false, Ordering::SeqCst);
+        return;
+    }
+    reset_snap_track();
+    std::thread::spawn(move || {
+        // 每一跳只落一次位置：`snap_apply` 拿指针位移累加出自由位置、算完吸附
+        // 再 `set_position` 一次。早先的写法是"先按位移挪一次、再被磁吸挪回来"，
+        // 一跳两次 `SetWindowPos`，跨线程，追不上快速拖动（实测尾巴差 6px）。
+        while desktop::left_button_down() {
+            snap_apply(&app, &label, true);
+            std::thread::sleep(Duration::from_millis(4));
+        }
+        DRAG_ACTIVE.store(false, Ordering::SeqCst);
+        // 最后一次 set_position 是异步的：松手后等它真正落到窗口上再对账，
+        // 否则读到的是倒数第二跳，磁吸会拿旧的 free/held 把窗口拽歪。
+        std::thread::sleep(Duration::from_millis(25));
+        // 松手后再对一次：磁吸收紧最后那一步没走完的几像素。
+        snap_apply(&app, &label, true);
+        // 之后还会有迟到的 Moved 事件；让它从窗口实际位置重新起算，别沿用
+        // 拖动期间那套自由位置。
+        reset_snap_track();
+    });
+}
+
 #[tauri::command]
 fn nudge_widget(app: AppHandle, label: String, dx: f64, dy: f64) -> Result<(), String> {
     if label != "monitor" && label != "weather" {
@@ -1881,6 +2171,7 @@ pub fn run() {
             set_widget_width,
             reset_widget_positions,
             nudge_widget,
+            drag_widget,
             set_widget_always_on_top,
             settle_widget,
             set_widget_adjust,
@@ -1962,6 +2253,7 @@ pub fn run() {
             spawn_collector(handle.clone());
             spawn_weather(handle.clone());
             spawn_widget_guard(handle.clone());
+            spawn_desktop_shadow(handle.clone());
 
             // 前台事件驱动的那一路（`Win+D` 不闪靠它），守护线程只做兜底。
             let _ = APP_HANDLE.set(handle.clone());

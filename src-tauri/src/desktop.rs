@@ -44,6 +44,8 @@ const SWP_NOOWNERZORDER: u32 = 0x0200;
 const GA_ROOT: u32 = 2;
 const SW_RESTORE: i32 = 9;
 
+const VK_LBUTTON: i32 = 0x01;
+
 const EVENT_SYSTEM_FOREGROUND: u32 = 0x0003;
 const WINEVENT_OUTOFCONTEXT: u32 = 0x0000;
 const WINEVENT_SKIPOWNPROCESS: u32 = 0x0002;
@@ -119,6 +121,7 @@ extern "system" {
     ) -> *mut c_void;
     fn UnhookWindowsHookEx(hook: *mut c_void) -> i32;
     fn CallNextHookEx(hook: *mut c_void, code: i32, w_param: usize, l_param: isize) -> isize;
+    fn GetAsyncKeyState(vk: i32) -> i16;
 }
 
 fn handle(win: &WebviewWindow) -> Option<*mut c_void> {
@@ -378,6 +381,12 @@ fn sits_on_desktop(hwnd: *mut c_void, desktop: *mut c_void, ignore: &[isize]) ->
     false
 }
 
+/// `sits_on_desktop` 的裸句柄版：快路径线程（`spawn_desktop_shadow`）拿它当
+/// 常态快检 —— 已贴好的卡片两格就命中，微秒级，不必每 4ms 都沿 z 序全程上溯。
+pub fn sits_on_desktop_hwnd(hwnd: isize, desktop: isize, ignore: &[isize]) -> bool {
+    sits_on_desktop(hwnd as *mut c_void, desktop as *mut c_void, ignore)
+}
+
 fn is_topmost_hwnd(hwnd: *mut c_void) -> bool {
     // SAFETY: 只读查询。
     unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST != 0 }
@@ -398,6 +407,30 @@ fn find_desktop_hwnd() -> Option<*mut c_void> {
         }
     }
     None
+}
+
+/// 桌面窗口的句柄（原始整数版），供快路径线程缓存。
+/// `Progman` / `WorkerW` 的句柄在 Explorer 重启时会变，缓存方要定时刷新。
+pub fn desktop_hwnd() -> Option<isize> {
+    find_desktop_hwnd().map(|h| h as isize)
+}
+
+/// 桌面此刻是不是压在 `hwnd` 上面（= 卡片被桌面盖住）。
+///
+/// 从 `hwnd` 沿 z 序**向上**走，撞到桌面句柄就算。只比整数、不查类名不查
+/// 可见性，一次遍历几十次 `GetWindow`，微秒级 —— 这是它能进 4ms 轮询的原因。
+/// 注意桌面是全屏窗口：它只要在 z 序上高于卡片，卡片所在的位置就被它盖住。
+pub fn desktop_above(hwnd: isize, desktop: isize) -> bool {
+    // SAFETY: 只读查询，沿 z 序往上走。
+    let mut h = unsafe { GetWindow(hwnd as *mut c_void, GW_HWNDPREV) };
+    while !h.is_null() {
+        if h as isize == desktop {
+            return true;
+        }
+        // SAFETY: 同上。
+        h = unsafe { GetWindow(h, GW_HWNDPREV) };
+    }
+    false
 }
 
 /// `a` 在 `b` 之上吗（z 序从顶往下先遇到 `a`）。
@@ -435,9 +468,27 @@ pub fn stick_to_desktop(win: &WebviewWindow, ignore: &[isize]) -> bool {
     let Some(hwnd) = handle(win) else {
         return false;
     };
+    stick_hwnd(hwnd as isize, ignore)
+}
+
+/// `stick_to_desktop` 的裸句柄版：给不经过 Tauri 窗口对象的快路径用
+/// （`lib.rs::spawn_desktop_shadow` 的 4ms  watcher 只缓存句柄整数）。
+pub fn stick_hwnd(hwnd: isize, ignore: &[isize]) -> bool {
+    let hwnd = hwnd as *mut c_void;
     let Some(desktop) = find_desktop_hwnd() else {
         // 找不到桌面（极少见）：退回全栈最底，至少别悬在半空。
-        to_bottom(win);
+        // SAFETY: 只改 z 序。
+        unsafe {
+            SetWindowPos(
+                hwnd,
+                HWND_BOTTOM as *mut c_void,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER,
+            );
+        }
         return true;
     };
     let was_top = is_topmost_hwnd(hwnd);
@@ -518,7 +569,14 @@ pub fn is_topmost(win: &WebviewWindow) -> bool {
     unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST != 0 }
 }
 
-/// 贴回窗口栈最底下（桌面家具的那一层）。
+/// 左键此刻按着吗。
+pub fn left_button_down() -> bool {
+    // SAFETY: 只读查询键状态。最高位为 1 表示按着。
+    unsafe { GetAsyncKeyState(VK_LBUTTON) as u16 & 0x8000 != 0 }
+}
+
+/// 贴回窗口栈最底下（桌面家具的那一层）——只在没有桌面窗口可认的时候用。
+#[allow(dead_code)]
 pub fn to_bottom(win: &WebviewWindow) {
     let Some(hwnd) = handle(win) else {
         return;
