@@ -632,23 +632,27 @@ fn apply_widget_behaviour(app: &AppHandle, cfg: &AppConfig) {
 /// 进程级 `AppHandle`，给 C ABI 的事件回调用（那条签名带不了闭包）。
 static APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
 
-/// z 序调整日志的节流：同一张卡片 2 秒内只写一条。
+/// z 序日志的降噪：同一张卡片、同一条文案，一分钟内只写一次。
 ///
-/// 这条日志只在"真挪了"时触发，正常情况下切换一次就一条。可一旦哪天又出现
-/// "清不掉"的现场，250ms 一轮会把 launch.log 刷满，反而看不到更早的线索。
-fn z_log_due(label: &str) -> bool {
-    static LAST: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+/// 「前台每切一次，守护线程就写一条落回桌面层」一天能攒一千多条。日志到
+/// 128KB 就要裁剪，这些重复条目既是那把刀下的燃料，又把更早的线索挤了出去
+/// （实测 1227 行里 1073 行是它）。文案里已经带了前台窗口类名 —— 真正有变化
+/// 的那条自然会留下来，重复的没有新信息。
+fn z_log(label: &str, text: String) {
+    static LAST: Mutex<[(String, u64); 2]> =
+        Mutex::new([(String::new(), 0), (String::new(), 0)]);
     let slot = if label == "monitor" { 0 } else { 1 };
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
-    let last = LAST[slot].load(Ordering::Relaxed);
-    if now.saturating_sub(last) < 2000 {
-        return false;
+    let now = now_ms();
+    if let Ok(mut last) = LAST.lock() {
+        let (prev, at) = &mut last[slot];
+        if *prev == text && now.saturating_sub(*at) < 60_000 {
+            *at = now;
+            return;
+        }
+        *prev = text.clone();
+        *at = now;
     }
-    LAST[slot].store(now, Ordering::Relaxed);
-    true
+    launchlog::log(&text);
 }
 
 /// 把一张卡片贴到「桌面正上方」—— 跟随桌面，而不是压到一切之上。
@@ -661,12 +665,15 @@ fn stick_for_desktop(win: &tauri::WebviewWindow) {
     desktop::set_no_activate(win, true);
     // `stick_to_desktop` 对"已经坐在桌面上"的卡片是幂等 no-op，所以连点两下
     // 桌面、守护线程每 250ms 兜底都不会多出一次重合成。真挪了才记日志。
-    if place_widget_level(win) && z_log_due(win.label()) {
-        launchlog::log(&format!(
-            "z: {} 贴到桌面正上方（前台={}）",
+    if place_widget_level(win) {
+        z_log(
             win.label(),
-            desktop::foreground_class(),
-        ));
+            format!(
+                "z: {} 贴到桌面正上方（前台={}）",
+                win.label(),
+                desktop::foreground_class(),
+            ),
+        );
     }
 }
 
@@ -993,13 +1000,16 @@ fn spawn_widget_guard(app: AppHandle) {
             // 半空位置，都会在这一步被一起收回来（先显式 `HWND_NOTOPMOST` 摘位，
             // 再插到桌面正上方 —— 只插不摘是摘不掉的）。
             temp_top_flag(label).store(false, Ordering::Relaxed);
-            if place_widget_level(&win) && z_log_due(label) {
-                launchlog::log(&format!(
-                    "z: {label} 落回桌面层（前台={} 置顶={} 桌面在前={})",
-                    desktop::foreground_class(),
-                    desktop::is_topmost(&win),
-                    desktop_front,
-                ));
+            if place_widget_level(&win) {
+                z_log(
+                    label,
+                    format!(
+                        "z: {label} 落回桌面层（前台={} 置顶={} 桌面在前={})",
+                        desktop::foreground_class(),
+                        desktop::is_topmost(&win),
+                        desktop_front,
+                    ),
+                );
             }
         }
     });
